@@ -8,6 +8,8 @@ Millie runs on the Chromium engine you already trust, wrapped in a native macOS 
 
 Apple Silicon · macOS 14 Sonoma or later. Signed & notarized by Red Clay AI, Inc. Open the `.dmg` and drag **Millie** to Applications.
 
+![Millie](docs/screenshots/hero.png)
+
 ---
 
 ## Organize the way you think
