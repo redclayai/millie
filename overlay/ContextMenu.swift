@@ -27,9 +27,10 @@ struct WebContextMenuRequest: Identifiable {
 // MARK: - Page scripts
 
 enum WebContextScripts {
-    /// Installs a capturing contextmenu listener. When the cursor is over a link
-    /// or image it records the target and `preventDefault()`s so Chrome's native
-    /// menu is suppressed and Millie's custom menu can take over.
+    /// Installs a capturing contextmenu listener. It records the target (link,
+    /// image, and/or selection) for every right-click and `preventDefault()`s so
+    /// Chrome's native menu is suppressed and Millie's custom menu can take over
+    /// — including on bare page area, where the native menu wouldn't render.
     static let listener = """
     (() => {
       if (window.__moriCtxInstalled) return;
@@ -63,19 +64,19 @@ enum WebContextScripts {
         const link = closestLink(e.target);
         const image = imageFor(e.target);
         const selection = String(window.getSelection ? getSelection() : '').trim();
-        if (link || image) {
-          window.__moriCtx = {
-            seq: ++window.__moriCtxSeq,
-            link: link ? link.href : '',
-            linkText: link ? (link.innerText || link.textContent || '').trim().slice(0, 140) : '',
-            image: image || '',
-            selection: selection
-          };
-          e.preventDefault();
-          e.stopPropagation();
-        } else {
-          window.__moriCtx = null;
-        }
+        // Capture every right-click — link, image, or bare page — and suppress
+        // Chrome's native menu so Millie's overlay menu handles all of them.
+        // (Chromium's native context menu does not render in the non-Views
+        // Mori window, so without this a plain-page right-click shows nothing.)
+        window.__moriCtx = {
+          seq: ++window.__moriCtxSeq,
+          link: link ? link.href : '',
+          linkText: link ? (link.innerText || link.textContent || '').trim().slice(0, 140) : '',
+          image: image || '',
+          selection: selection
+        };
+        e.preventDefault();
+        e.stopPropagation();
       }, true);
     })();
     """
@@ -199,6 +200,12 @@ extension BrowserStore {
         newTab(url: "https://lens.google.com/uploadbyurl?url=\(encoded)", select: true)
         dismissWebContextMenu()
     }
+
+    // Page navigation
+
+    func ctxGoBack() { dismissWebContextMenu(); selectedTab?.goBack() }
+    func ctxGoForward() { dismissWebContextMenu(); selectedTab?.goForward() }
+    func ctxReload() { dismissWebContextMenu(); selectedTab?.reload() }
 
     // Shared
 
@@ -368,6 +375,32 @@ private struct WebContextMenuCard: View {
             CtxRow(icon: "magnifyingglass", title: "Search Image with Google") {
                 store.ctxSearchImage(image)
             }
+        }
+
+        // Bare page (no link or image): a default page menu so a right-click
+        // anywhere always shows something.
+        if !target.hasContent {
+            pageItems
+        }
+    }
+
+    @ViewBuilder
+    private var pageItems: some View {
+        if store.selectedTab?.canGoBack == true {
+            CtxRow(icon: "chevron.left", title: "Back") { store.ctxGoBack() }
+        }
+        if store.selectedTab?.canGoForward == true {
+            CtxRow(icon: "chevron.right", title: "Forward") { store.ctxGoForward() }
+        }
+        CtxRow(icon: "arrow.clockwise", title: "Reload") { store.ctxReload() }
+        CtxDivider()
+        if !target.selection.isEmpty {
+            CtxRow(icon: "doc.on.doc", title: "Copy") {
+                store.ctxCopy(target.selection, message: "Copied")
+            }
+        }
+        CtxRow(icon: "link", title: "Copy Page Link") {
+            store.ctxCopy(store.selectedTab?.urlString ?? "", message: "Link copied")
         }
     }
 

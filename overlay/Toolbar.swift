@@ -119,6 +119,8 @@ struct Omnibox: View {
 
             ReaderButton(store: store, tab: tab)
 
+            CopyLinkButton(store: store, tab: tab)
+
             if tab.isLoading {
                 ProgressView().controlSize(.small).scaleEffect(0.55)
             }
@@ -161,6 +163,27 @@ struct Omnibox: View {
         if tab.urlString.hasPrefix("https") { return p.mutedForeground.color }
         if tab.urlString.hasPrefix("http") { return p.statusWarningFg.color }
         return p.mutedForeground.color
+    }
+}
+
+/// Arc-style quick copy-link button in the omnibox: one click copies the
+/// current page URL to the clipboard, confirming with a toast.
+struct CopyLinkButton: View {
+    @ObservedObject var store: BrowserStore
+    @ObservedObject var tab: BrowserTab
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        if tab.urlString.hasPrefix("http") {
+            Button { store.copyCurrentTabURL() } label: {
+                Icon(name: "link", size: 13)
+                    .foregroundStyle(p.mutedForeground.color)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Copy Link")
+        }
     }
 }
 
