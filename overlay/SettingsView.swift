@@ -102,6 +102,23 @@ struct SettingsView: View {
 
     // MARK: Sections
 
+    /// Marketing version from the app bundle (set by release.sh per release),
+    /// so the card always reflects the running build — not a hardcoded string.
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
+    /// Chromium milestone, read from the embedded Chromium Framework bundle.
+    private var chromiumVersion: String {
+        let fw = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Frameworks/Chromium Framework.framework")
+        return (Bundle(url: fw)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? ""
+    }
+    private var versionLine: String {
+        chromiumVersion.isEmpty
+            ? "Version \(appVersion)"
+            : "Version \(appVersion) · Chromium \(chromiumVersion)"
+    }
+
     private var aboutSection: some View {
         Section(title: "About") {
             HStack(alignment: .center, spacing: 14) {
@@ -114,7 +131,7 @@ struct SettingsView: View {
                     Text("A native macOS browser built on Chromium.")
                         .font(Typography.ui(Typography.base))
                         .foregroundStyle(p.mutedForeground.color)
-                    Text("Version 2.1 · Chromium 149.0.7827.155")
+                    Text(versionLine)
                         .font(Typography.ui(Typography.label))
                         .foregroundStyle(p.mutedForeground.color)
                 }
