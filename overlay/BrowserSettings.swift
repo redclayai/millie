@@ -1,0 +1,374 @@
+import SwiftUI
+
+/// User-facing browser preferences. Persisted to `UserDefaults` and observed by
+/// the chrome so changes apply live. One shared instance backs the single
+/// window; views that need live updates observe it directly.
+final class BrowserSettings: ObservableObject {
+    static let shared = BrowserSettings()
+
+    // MARK: General
+
+    /// The page opened at launch and by "new tab → homepage".
+    @Published var homepageURL: String {
+        didSet { defaults.set(homepageURL, forKey: Key.homepage) }
+    }
+
+    /// What a freshly opened tab loads.
+    @Published var newTabBehavior: NewTabBehavior {
+        didSet { defaults.set(newTabBehavior.rawValue, forKey: Key.newTab) }
+    }
+
+    // MARK: Search
+
+    @Published var searchEngine: SearchEngine {
+        didSet { defaults.set(searchEngine.rawValue, forKey: Key.engine) }
+    }
+
+    /// Used only when `searchEngine == .custom`. `{query}` is substituted.
+    @Published var customSearchTemplate: String {
+        didSet { defaults.set(customSearchTemplate, forKey: Key.customEngine) }
+    }
+
+    // MARK: Privacy
+
+    /// Blocks ad-serving requests using Millie's bundled Block List Project list.
+    @Published var blockAds: Bool {
+        didSet {
+            defaults.set(blockAds, forKey: Key.blockAds)
+            MoriBrowserView.setAdBlockerEnabled(blockAds)
+        }
+    }
+
+    /// Enables Millie's local Codex assistant and browser automation tools.
+    @Published var aiIntegrationEnabled: Bool {
+        didSet { defaults.set(aiIntegrationEnabled, forKey: Key.aiIntegrationEnabled) }
+    }
+
+    /// Whether "Ask Milly" may attach the current page's text to a cloud
+    /// provider request. When off — or on a private Space, an internal Millie
+    /// page, or a local file — only the user's question is sent, never page
+    /// content. Does not affect the local Codex provider.
+    @Published var sharesPageWithAI: Bool {
+        didSet { defaults.set(sharesPageWithAI, forKey: Key.sharesPageWithAI) }
+    }
+
+    /// Which backend Ask Milly talks to: the built-in local Codex, or a
+    /// bring-your-own-key cloud provider (key in the Keychain per provider).
+    @Published var assistantProvider: AIProvider {
+        didSet { defaults.set(assistantProvider.rawValue, forKey: Key.assistantProvider) }
+    }
+
+    /// Editable model per BYO provider (defaults to the provider's default).
+    func model(for p: AIProvider) -> String {
+        let v = defaults.string(forKey: "mori.model.\(p.rawValue)") ?? ""
+        return v.isEmpty ? p.defaultModel : v
+    }
+    func setModel(_ model: String, for p: AIProvider) {
+        let m = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaults.set(m.isEmpty ? p.defaultModel : m, forKey: "mori.model.\(p.rawValue)")
+    }
+
+    // MARK: Appearance
+
+    @Published var theme: ThemePreference {
+        didSet { defaults.set(theme.rawValue, forKey: Key.theme) }
+    }
+
+    /// Whether the tab sidebar is shown when the window opens.
+    @Published var showSidebarOnLaunch: Bool {
+        didSet { defaults.set(showSidebarOnLaunch, forKey: Key.sidebarOnLaunch) }
+    }
+
+    /// Which side of the window hosts the tab sidebar.
+    @Published var sidebarPosition: SidebarPosition {
+        didSet { defaults.set(sidebarPosition.rawValue, forKey: Key.sidebarPosition) }
+    }
+
+    /// The tab sidebar's width, set by dragging its inner-edge resize handle.
+    /// Clamped to `[Self.minSidebarWidth, Self.maxSidebarWidth]` on every write.
+    @Published var sidebarWidth: CGFloat {
+        didSet {
+            let clamped = sidebarWidth.clamped(to: Self.minSidebarWidth...Self.maxSidebarWidth)
+            if clamped != sidebarWidth { sidebarWidth = clamped; return }
+            defaults.set(Double(sidebarWidth), forKey: Key.sidebarWidth)
+        }
+    }
+
+    static let minSidebarWidth: CGFloat = 200
+    static let maxSidebarWidth: CGFloat = 420
+    static let defaultSidebarWidth: CGFloat = 256
+
+    /// The user's custom gradient theme (chrome wash + derived accent). Empty
+    /// means "no custom theme" — the chrome uses the plain light/dark tint.
+    /// Persisted as JSON. Single global theme for now; when multi-space lands,
+    /// this becomes a per-space map keyed by the active space.
+    @Published var gradientTheme: GradientTheme {
+        didSet {
+            if let data = try? JSONEncoder().encode(gradientTheme) {
+                defaults.set(data, forKey: Key.gradientTheme)
+            }
+        }
+    }
+
+    // MARK: Media
+
+    /// Automatically enter Picture-in-Picture when you switch away from a tab
+    /// that's playing video (YouTube, etc.).
+    @Published var autoPiP: Bool {
+        didSet {
+            defaults.set(autoPiP, forKey: Key.autoPiP)
+            MoriBrowserView.setAutoPiPEnabled(autoPiP)
+        }
+    }
+
+    // MARK: Tab maintenance
+
+    /// Put background tabs to sleep (discard their renderer to reclaim memory)
+    /// after this many minutes untouched. 0 disables auto-sleep.
+    @Published var autoSleepMinutes: Int {
+        didSet { defaults.set(autoSleepMinutes, forKey: Key.autoSleepMinutes) }
+    }
+
+    /// Auto-archive background tabs (closed to the restorable Archive, Arc-style)
+    /// after this many hours untouched. 0 disables auto-archive.
+    @Published var autoArchiveHours: Int {
+        didSet { defaults.set(autoArchiveHours, forKey: Key.autoArchiveHours) }
+    }
+
+    /// Order Ctrl+Tab / Ctrl+Shift+Tab walk through tabs: most-recently-used
+    /// (Arc/Dia style) or sidebar position.
+    @Published var tabCycleOrder: TabCycleOrder {
+        didSet { defaults.set(tabCycleOrder.rawValue, forKey: Key.tabCycleOrder) }
+    }
+
+    // MARK: Resolution helpers
+
+    /// The built-in start page, served from Millie's internal scheme so it
+    /// reads as native chrome (empty address bar, no file:// path).
+    static let defaultHomepageURL = "millie://newtab/"
+
+    /// The legacy internal-page scheme (pre-Millie branding), still recognized so
+    /// older sessions/prefs keep working.
+    static let legacyHomepageURL = "mori://newtab/"
+
+    /// Whether a URL is one of Millie's internal start-page schemes (current or
+    /// legacy). Used to hide the URL / mark the tab as internal.
+    static func isInternalPage(_ url: String) -> Bool {
+        url.hasPrefix("millie://") || url.hasPrefix("mori://")
+    }
+
+    /// Build the destination for a query, honoring the active engine.
+    func searchURL(for query: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?/#")
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
+        let rawTemplate = searchEngine == .custom ? customSearchTemplate : searchEngine.queryTemplate
+        let template = rawTemplate.isEmpty ? SearchEngine.google.queryTemplate : rawTemplate
+        if template.contains("{query}") {
+            return template.replacingOccurrences(of: "{query}", with: encoded)
+        }
+        // Tolerate a bare endpoint by appending the query.
+        return template + encoded
+    }
+
+    /// The URL a new tab should load given the current behavior setting.
+    var newTabURL: String {
+        switch newTabBehavior {
+        case .homepage: return homepageURL
+        case .blank: return "about:blank"
+        }
+    }
+
+    // MARK: Persistence
+
+    private let defaults: UserDefaults
+
+    private enum Key {
+        static let homepage = "mori.homepageURL"
+        static let newTab = "mori.newTabBehavior"
+        static let engine = "mori.searchEngine"
+        static let customEngine = "mori.customSearchTemplate"
+        static let blockAds = "mori.blockAds"
+        static let aiIntegrationEnabled = "mori.aiIntegrationEnabled"
+        static let sharesPageWithAI = "mori.sharesPageWithAI"
+        static let assistantProvider = "mori.assistantProvider"
+        static let theme = "mori.theme"
+        static let sidebarOnLaunch = "mori.showSidebarOnLaunch"
+        static let sidebarPosition = "mori.sidebarPosition"
+        static let sidebarWidth = "mori.sidebarWidth"
+        static let autoPiP = "mori.autoPiP"
+        static let gradientTheme = "mori.gradientTheme"
+        static let autoSleepMinutes = "mori.autoSleepMinutes"
+        static let autoArchiveHours = "mori.autoArchiveHours"
+        static let tabCycleOrder = "mori.tabCycleOrder"
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        // Migrate older home pages: the bundled file:// page and the previous
+        // mori:// internal scheme both move to the current millie:// start page.
+        let storedHome = defaults.string(forKey: Key.homepage)
+        let resolvedHome: String
+        if let storedHome,
+           storedHome.contains("home.html") || storedHome == BrowserSettings.legacyHomepageURL {
+            resolvedHome = BrowserSettings.defaultHomepageURL
+            defaults.set(resolvedHome, forKey: Key.homepage)
+        } else {
+            resolvedHome = storedHome ?? BrowserSettings.defaultHomepageURL
+        }
+        homepageURL = resolvedHome
+        newTabBehavior = NewTabBehavior(rawValue: defaults.string(forKey: Key.newTab) ?? "")
+            ?? .homepage
+        searchEngine = SearchEngine(rawValue: defaults.string(forKey: Key.engine) ?? "")
+            ?? .google
+        customSearchTemplate = defaults.string(forKey: Key.customEngine)
+            ?? "https://www.example.com/search?q={query}"
+        blockAds = defaults.object(forKey: Key.blockAds) as? Bool ?? true
+        aiIntegrationEnabled = defaults.object(forKey: Key.aiIntegrationEnabled) as? Bool ?? true
+        sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
+        assistantProvider = AIProvider(rawValue: defaults.string(forKey: Key.assistantProvider) ?? "") ?? .codex
+        theme = ThemePreference(rawValue: defaults.string(forKey: Key.theme) ?? "")
+            ?? .system
+        // Default the sidebar on (matches the Millie default chrome).
+        showSidebarOnLaunch = defaults.object(forKey: Key.sidebarOnLaunch) as? Bool ?? true
+        // Arc-style browser structure: the sidebar is the primary navigation
+        // rail, so new profiles start with it on the left. Users can still move
+        // it from Settings.
+        sidebarPosition = SidebarPosition(rawValue: defaults.string(forKey: Key.sidebarPosition) ?? "")
+            ?? .left
+        let storedWidth = defaults.object(forKey: Key.sidebarWidth) as? Double
+        sidebarWidth = (storedWidth.map { CGFloat($0) } ?? BrowserSettings.defaultSidebarWidth)
+            .clamped(to: BrowserSettings.minSidebarWidth...BrowserSettings.maxSidebarWidth)
+        gradientTheme = defaults.data(forKey: Key.gradientTheme)
+            .flatMap { try? JSONDecoder().decode(GradientTheme.self, from: $0) }
+            ?? .none
+        autoPiP = defaults.object(forKey: Key.autoPiP) as? Bool ?? true
+        autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 60
+        autoArchiveHours = defaults.object(forKey: Key.autoArchiveHours) as? Int ?? 24
+        // Default to Arc/Dia behavior: Ctrl+Tab walks most-recently-used tabs.
+        tabCycleOrder = TabCycleOrder(rawValue: defaults.string(forKey: Key.tabCycleOrder) ?? "")
+            ?? .recentlyUsed
+
+        // Apply the persisted auto-PiP default to the engine on startup.
+        MoriBrowserView.setAutoPiPEnabled(autoPiP)
+        MoriBrowserView.setAdBlockerEnabled(blockAds)
+    }
+}
+
+extension Comparable {
+    /// Constrains the value to the given closed range.
+    func clamped(to limits: ClosedRange<Self>) -> Self {
+        min(max(self, limits.lowerBound), limits.upperBound)
+    }
+}
+
+// MARK: - Option enums
+
+enum SidebarPosition: String, CaseIterable, Identifiable {
+    case left, right
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .left: return "Left"
+        case .right: return "Right"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .left: return "sidebar.left"
+        case .right: return "sidebar.right"
+        }
+    }
+
+    var edge: Edge {
+        switch self {
+        case .left: return .leading
+        case .right: return .trailing
+        }
+    }
+}
+
+enum ThemePreference: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .system: return "circle.lefthalf.filled"
+        case .light: return "sun.max"
+        case .dark: return "moon"
+        }
+    }
+
+    /// nil = follow the system appearance.
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
+enum TabCycleOrder: String, CaseIterable, Identifiable {
+    /// Ctrl+Tab walks tabs by recency (Arc/Dia / ⌘-Tab style).
+    case recentlyUsed
+    /// Ctrl+Tab walks tabs in sidebar position order.
+    case inOrder
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .recentlyUsed: return "Recently used"
+        case .inOrder: return "Sidebar order"
+        }
+    }
+}
+
+enum NewTabBehavior: String, CaseIterable, Identifiable {
+    case homepage, blank
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .homepage: return "Open homepage"
+        case .blank: return "Open a blank page"
+        }
+    }
+}
+
+enum SearchEngine: String, CaseIterable, Identifiable {
+    case google, duckduckgo, bing, brave, custom
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .google: return "Google"
+        case .duckduckgo: return "DuckDuckGo"
+        case .bing: return "Bing"
+        case .brave: return "Brave"
+        case .custom: return "Custom…"
+        }
+    }
+
+    /// `{query}` is replaced with the percent-encoded search terms.
+    var queryTemplate: String {
+        switch self {
+        case .google: return "https://www.google.com/search?q={query}"
+        case .duckduckgo: return "https://duckduckgo.com/?q={query}"
+        case .bing: return "https://www.bing.com/search?q={query}"
+        case .brave: return "https://search.brave.com/search?q={query}"
+        case .custom: return ""
+        }
+    }
+}

@@ -1,0 +1,17 @@
+# --- Secrets: NEVER commit (Developer ID private key + CSR) ---
+devid/
+*.key
+*.p12
+*.pem
+*.cer
+*certSigningRequest*
+
+# --- Logs / generated / scratch ---
+*.log
+*.bak
+.DS_Store
+.build_injected.sh
+
+# --- Build + release outputs ---
+dist/
+*.dmg
