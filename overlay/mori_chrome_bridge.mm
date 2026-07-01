@@ -1733,6 +1733,16 @@ Browser* ActiveBrowser() {
   NSView* rendererNativeView =
       renderView ? renderView->GetNativeView().GetNativeNSView() : nil;
   NSWindow* window = self.window ?: rendererNativeView.window ?: _webView.window;
+  // Never steal key focus from another window. focusBrowser runs from several
+  // triggers (auto-refocus after background loads, tab attach, in-window
+  // clicks). If a different window currently holds key — e.g. a popup / compose
+  // window the user is typing in — grabbing key here would yank them out. Only
+  // take key + first responder when our own window already holds key, or when
+  // nothing does. SPAs like Outlook fire background loads constantly, so this
+  // guard is what keeps a popup usable.
+  if (NSApp.keyWindow && NSApp.keyWindow != window) {
+    return;
+  }
   if (window && !window.isKeyWindow) {
     [window makeKeyWindow];
   }
