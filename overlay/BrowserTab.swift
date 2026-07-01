@@ -64,6 +64,12 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     /// Traffic Control routing rules.
     var onDidNavigate: ((BrowserTab, String) -> Void)?
 
+    /// Fired when a navigation is stopped because the destination is on the
+    /// phishing/malware blocklist, so the store can raise the interstitial.
+    var onThreatBlocked: ((BrowserTab, String) -> Void)?
+    /// Hosts the user chose to visit despite a Safe Browsing block (per tab).
+    var bypassedThreatHosts: Set<String> = []
+
     /// The native CEF-backed view. Created lazily on first `realize()` and
     /// recreated transparently after `sleep()` discards it to reclaim memory.
     /// Only ever touched for realized tabs, so reading it never forces an
@@ -448,6 +454,16 @@ extension BrowserTab: MoriBrowserViewDelegate {
     }
 
     func browserView(_ view: MoriBrowserView, didCommitNavigationToURL url: String) {
+        // Safe Browsing: block known phishing / malware hosts. Runs on commit —
+        // the earliest callback carrying the real destination URL (didStart gets
+        // the engine's stale previous URL). Stop the load and raise the block.
+        if BrowserSettings.shared.safeBrowsingEnabled,
+           !bypassedThreatHosts.contains(URLComponents(string: url)?.host?.lowercased() ?? ""),
+           ThreatStore.shared.isBlocked(urlString: url) {
+            stop()
+            onThreatBlocked?(self, url)
+            return
+        }
         updateURL(url)
         // Inject CSS early to minimize flash; JS waits for the finish callback.
         applyBoosts()

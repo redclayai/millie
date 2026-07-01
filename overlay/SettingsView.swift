@@ -188,6 +188,20 @@ struct SettingsView: View {
                         .foregroundStyle(p.mutedForeground.color)
                 }
             }
+
+            Hairline().opacity(0.5)
+
+            ToggleRow(isOn: $settings.safeBrowsingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Block dangerous sites")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text("Warn before loading known phishing or malware sites, using Millie's offline blocklist. No browsing data leaves your device.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
