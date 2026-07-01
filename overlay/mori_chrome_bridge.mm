@@ -1508,6 +1508,15 @@ Browser* ActiveBrowser() {
       return;
     }
     NSWindow* window = self.window ?: self->_webView.window;
+    // Don't cross-window steal focus. This fires from WebContentsObserver
+    // callbacks (DidStopLoading / PrimaryPageChanged) on the main window's
+    // tabs, which SPAs like Outlook trigger constantly in the background. If
+    // the user is working in another window (e.g. a popup / compose window),
+    // grabbing key here would yank them out mid-type. Only auto-refocus web
+    // content when our own window is already key (or nothing is key).
+    if (NSApp.keyWindow && NSApp.keyWindow != window) {
+      return;
+    }
     if (IsNativeTextInputFirstResponder(window.firstResponder)) {
       return;
     }
