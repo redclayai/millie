@@ -4742,7 +4742,7 @@ index 9acda3acb3..26b022e488 100644
    </message>
  </grit-part>
 diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
-index 5ef79ef4e8..3033366ee3 100644
+index 5ef79ef4e8..3ffe760552 100644
 --- a/chrome/browser/ui/BUILD.gn
 +++ b/chrome/browser/ui/BUILD.gn
 @@ -2,6 +2,7 @@
@@ -4840,7 +4840,7 @@ index 5ef79ef4e8..3033366ee3 100644
      "//components/segmentation_platform/public",
      "//components/sync",
      "//components/sync_user_events",
-@@ -6021,3 +6017,97 @@ if (use_aura) {
+@@ -6021,3 +6017,99 @@ if (use_aura) {
      ]
    }
  }
@@ -4902,8 +4902,10 @@ index 5ef79ef4e8..3033366ee3 100644
 +      "mori/Reader.swift",
 +      "mori/RootView.swift",
 +      "mori/RouteStore.swift",
++      "mori/SafeBrowsingOverlay.swift",
 +      "mori/Screenshot.swift",
 +      "mori/SettingsView.swift",
++      "mori/ThreatStore.swift",
 +      "mori/ShortcutRegistry.swift",
 +      "mori/Sidebar.swift",
 +      "mori/SidebarPeek.swift",
