@@ -122,6 +122,10 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 /// through the renderer at the given point. Returns NO when unavailable.
 - (BOOL)saveImageURL:(NSString *)url atWindowPoint:(NSPoint)point;
 
+/// Open DevTools and inspect the element under a window-space point (Chrome's
+/// "Inspect" context-menu action). Returns NO when unavailable.
+- (BOOL)inspectElementAtWindowPoint:(NSPoint)point;
+
 /// Make this browser the first responder / give it keyboard focus.
 - (void)focusBrowser;
 

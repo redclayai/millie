@@ -212,6 +212,12 @@ extension BrowserStore {
         newTab(url: BrowserSettings.shared.searchURL(for: text), select: true)
     }
 
+    func ctxInspect() {
+        let point = contextMenu?.windowPoint ?? .zero
+        dismissWebContextMenu()
+        selectedTab?.inspectElement(at: point)
+    }
+
     // Shared
 
     func ctxCopy(_ string: String, message: String) {
@@ -386,6 +392,12 @@ private struct WebContextMenuCard: View {
         // anywhere always shows something.
         if !target.hasContent {
             pageItems
+        }
+
+        // Inspect is available on every menu, mirroring Chrome.
+        CtxDivider()
+        CtxRow(icon: "chevron.left.forwardslash.chevron.right", title: "Inspect Element") {
+            store.ctxInspect()
         }
     }
 
