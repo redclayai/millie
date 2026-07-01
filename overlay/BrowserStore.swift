@@ -452,7 +452,46 @@ final class BrowserStore: ObservableObject {
         tab.onDidNavigate = { [weak self] tab, url in
             self?.applyRouting(for: tab, url: url)
         }
+        tab.onThreatBlocked = { [weak self] tab, url in
+            self?.presentThreatBlock(tab: tab, url: url)
+        }
         return tab
+    }
+
+    // MARK: Safe Browsing (phishing / malware block)
+
+    /// An active block: the tab + URL that were stopped, plus the host to show.
+    struct ThreatBlock: Equatable {
+        let tabID: BrowserTab.ID
+        let url: String
+        let host: String
+    }
+    @Published var threatBlock: ThreatBlock?
+
+    private static func threatHost(_ url: String) -> String {
+        URLComponents(string: url)?.host?.lowercased() ?? url
+    }
+
+    /// A tab stopped a navigation because the destination is on the blocklist.
+    private func presentThreatBlock(tab: BrowserTab, url: String) {
+        threatBlock = ThreatBlock(tabID: tab.id, url: url, host: Self.threatHost(url))
+    }
+
+    /// "Back to safety": leave the bad site — go back if possible, else homepage.
+    func dismissThreatBlock() {
+        let block = threatBlock
+        threatBlock = nil
+        guard let block, let tab = tabs.first(where: { $0.id == block.tabID }) else { return }
+        if tab.canGoBack { tab.goBack() } else { tab.load(settings.homepageURL) }
+    }
+
+    /// "Proceed anyway": remember the bypass for this host and reload the URL.
+    func proceedThroughThreat() {
+        let block = threatBlock
+        threatBlock = nil
+        guard let block, let tab = tabs.first(where: { $0.id == block.tabID }) else { return }
+        tab.bypassedThreatHosts.insert(Self.threatHost(block.url))
+        tab.load(block.url)
     }
 
     // MARK: Tab management

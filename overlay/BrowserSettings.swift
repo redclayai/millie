@@ -39,6 +39,12 @@ final class BrowserSettings: ObservableObject {
         }
     }
 
+    /// Blocks known phishing/malware hosts using Millie's offline blocklist
+    /// (built from the URLhaus + Phishing.Database open feeds). No telemetry.
+    @Published var safeBrowsingEnabled: Bool {
+        didSet { defaults.set(safeBrowsingEnabled, forKey: Key.safeBrowsing) }
+    }
+
     /// Enables Millie's local Codex assistant and browser automation tools.
     @Published var aiIntegrationEnabled: Bool {
         didSet { defaults.set(aiIntegrationEnabled, forKey: Key.aiIntegrationEnabled) }
@@ -189,6 +195,7 @@ final class BrowserSettings: ObservableObject {
         static let engine = "mori.searchEngine"
         static let customEngine = "mori.customSearchTemplate"
         static let blockAds = "mori.blockAds"
+        static let safeBrowsing = "mori.safeBrowsing"
         static let aiIntegrationEnabled = "mori.aiIntegrationEnabled"
         static let sharesPageWithAI = "mori.sharesPageWithAI"
         static let assistantProvider = "mori.assistantProvider"
@@ -224,6 +231,7 @@ final class BrowserSettings: ObservableObject {
         customSearchTemplate = defaults.string(forKey: Key.customEngine)
             ?? "https://www.example.com/search?q={query}"
         blockAds = defaults.object(forKey: Key.blockAds) as? Bool ?? true
+        safeBrowsingEnabled = defaults.object(forKey: Key.safeBrowsing) as? Bool ?? true
         aiIntegrationEnabled = defaults.object(forKey: Key.aiIntegrationEnabled) as? Bool ?? true
         sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
         assistantProvider = AIProvider(rawValue: defaults.string(forKey: Key.assistantProvider) ?? "") ?? .codex

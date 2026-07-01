@@ -351,6 +351,8 @@ private struct ActiveWebContent: View {
         if tab.didFail {
             ErrorOverlay(tab: tab)
         }
+
+        SafeBrowsingOverlay(store: store)
     }
 }
 
