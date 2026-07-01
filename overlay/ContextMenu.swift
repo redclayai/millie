@@ -207,6 +207,11 @@ extension BrowserStore {
     func ctxGoForward() { dismissWebContextMenu(); selectedTab?.goForward() }
     func ctxReload() { dismissWebContextMenu(); selectedTab?.reload() }
 
+    func ctxSearchText(_ text: String) {
+        dismissWebContextMenu()
+        newTab(url: BrowserSettings.shared.searchURL(for: text), select: true)
+    }
+
     // Shared
 
     func ctxCopy(_ string: String, message: String) {
@@ -386,6 +391,15 @@ private struct WebContextMenuCard: View {
 
     @ViewBuilder
     private var pageItems: some View {
+        if !target.selection.isEmpty {
+            CtxRow(icon: "doc.on.doc", title: "Copy") {
+                store.ctxCopy(target.selection, message: "Copied")
+            }
+            CtxRow(icon: "magnifyingglass", title: "Search for “\(searchSnippet)”") {
+                store.ctxSearchText(target.selection)
+            }
+            CtxDivider()
+        }
         if store.selectedTab?.canGoBack == true {
             CtxRow(icon: "chevron.left", title: "Back") { store.ctxGoBack() }
         }
@@ -394,14 +408,15 @@ private struct WebContextMenuCard: View {
         }
         CtxRow(icon: "arrow.clockwise", title: "Reload") { store.ctxReload() }
         CtxDivider()
-        if !target.selection.isEmpty {
-            CtxRow(icon: "doc.on.doc", title: "Copy") {
-                store.ctxCopy(target.selection, message: "Copied")
-            }
-        }
         CtxRow(icon: "link", title: "Copy Page Link") {
             store.ctxCopy(store.selectedTab?.urlString ?? "", message: "Link copied")
         }
+    }
+
+    /// Selection text trimmed for the "Search for …" menu label.
+    private var searchSnippet: String {
+        let s = target.selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.count > 30 ? String(s.prefix(30)) + "…" : s
     }
 
     @ViewBuilder

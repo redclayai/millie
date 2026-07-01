@@ -255,8 +255,11 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         Task { @MainActor in _ = try? await evaluateMediaJavaScript(MediaAgentScripts.agent) }
     }
 
-    /// Read (and clear) the most recent right-click target, if it was a link or
-    /// image.
+    /// Read (and clear) the most recent right-click target. A non-nil result
+    /// means the click landed on web content — link, image, text selection, or
+    /// bare page — and the caller picks which menu to show. Returns nil only
+    /// when no page-side contextmenu was captured (e.g. a right-click outside
+    /// the web view), so selection/empty-page clicks still get a menu.
     func readContextMenuTarget() async -> LinkImageContextTarget? {
         guard isRealized,
               let result = try? await evaluateJavaScript(WebContextScripts.read),
@@ -264,12 +267,11 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         else { return nil }
         let link = (dict["link"] as? String) ?? ""
         let image = (dict["image"] as? String) ?? ""
-        let target = LinkImageContextTarget(
+        return LinkImageContextTarget(
             linkURL: link.isEmpty ? nil : link,
             linkText: (dict["linkText"] as? String) ?? "",
             imageURL: image.isEmpty ? nil : image,
             selection: (dict["selection"] as? String) ?? "")
-        return target.hasContent ? target : nil
     }
 
     /// Copy the image under `windowPoint` (window coordinates) to the pasteboard
