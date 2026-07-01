@@ -1470,6 +1470,22 @@ Browser* ActiveBrowser() {
   return YES;
 }
 
+- (BOOL)inspectElementAtWindowPoint:(NSPoint)windowPoint {
+  if (!_webContents) {
+    return NO;
+  }
+  content::RenderFrameHost* frame = _webContents->GetPrimaryMainFrame();
+  int x = 0, y = 0;
+  if (!frame ||
+      ![self viewportPointForWindowPoint:windowPoint outX:&x outY:&y]) {
+    return NO;
+  }
+  // Opens DevTools (creating it if needed) and selects the element at the
+  // click point — the same entry point as Chrome's "Inspect" context item.
+  DevToolsWindow::InspectElement(frame, x, y);
+  return YES;
+}
+
 - (BOOL)saveImageURL:(NSString*)url atWindowPoint:(NSPoint)windowPoint {
   if (!_webContents) {
     return NO;

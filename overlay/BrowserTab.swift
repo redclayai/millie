@@ -291,6 +291,13 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         return realize().saveImageURL(url, atWindowPoint: windowPoint)
     }
 
+    /// Open DevTools and inspect the element under `windowPoint`.
+    @discardableResult
+    func inspectElement(at windowPoint: CGPoint) -> Bool {
+        guard isRealized else { return false }
+        return realize().inspectElement(atWindowPoint: windowPoint)
+    }
+
     @MainActor
     func evaluateJavaScript(_ source: String) async throws -> Any {
         try await evaluateJavaScript(source, inMediaWorld: false)
