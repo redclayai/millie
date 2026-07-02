@@ -429,6 +429,11 @@ extension BrowserTab: MoriBrowserViewDelegate {
 
     func browserView(_ view: MoriBrowserView, didLoadFaviconImage image: NSImage?) {
         self.faviconImage = image
+        // Persist by host so restored/asleep tabs can show this icon without a
+        // live page (see FaviconCache).
+        if let image {
+            FaviconCache.shared.store(image, host: SiteBrand.host(from: urlString))
+        }
     }
 
     func browserView(_ view: MoriBrowserView,

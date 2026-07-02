@@ -5053,3 +5053,224 @@ index 8061f2f6ef..3b48b6029c 100644
      theme->background_tiling = GetNewTabBackgroundTilingCSS(*theme_provider);
      theme->background_position =
          GetNewTabBackgroundPositionCSS(*theme_provider);
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 62560fee00..7386972c2a 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -1054,6 +1054,31 @@ void ChromeMainDelegate::SetupTracing() {
+ }
+ 
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
++  // Millie: bake in the switches required for premium DRM streaming so they
++  // apply on a normal (Dock) launch without being passed manually.
++  //  - PlatformHEVCDecoderSupport: HEVC is compiled in but gated off at runtime.
++  //  - disable-gpu-compositing: Millie's non-Views window cannot present the
++  //    hardware video-overlay CALayer that protected (EME) video is promoted to,
++  //    so DRM video renders blank under GPU compositing; software compositing
++  //    routes it through the surface Millie does present.
++  // Appended here (the earliest delegate hook) so it lands before FeatureList
++  // and GPU initialization.
++  {
++    base::CommandLine* mori_cmd = base::CommandLine::ForCurrentProcess();
++    if (!mori_cmd->HasSwitch("disable-gpu-compositing")) {
++      mori_cmd->AppendSwitch("disable-gpu-compositing");
++    }
++    std::string mori_features =
++        mori_cmd->GetSwitchValueASCII("enable-features");
++    if (mori_features.find("PlatformHEVCDecoderSupport") ==
++        std::string::npos) {
++      mori_cmd->AppendSwitchASCII(
++          "enable-features",
++          mori_features.empty()
++              ? "PlatformHEVCDecoderSupport"
++              : mori_features + ",PlatformHEVCDecoderSupport");
++    }
++  }
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+ #endif
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 66cf6ce5f5..6b632d120f 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -163,9 +163,11 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   bool parse_result = base::StringToInt(major_version, &major_version_number);
+   DCHECK(parse_result);
+   std::optional<std::string> brand;
+-#if !BUILDFLAG(CHROMIUM_BRANDING)
+-  brand = version_info::GetProductName();
+-#endif
++  // Millie: always identify as "Google Chrome" in the Sec-CH-UA brand list.
++  // Premium streaming services (Netflix, DirecTV) gate playback authorization
++  // on a recognized browser brand; the default "Chromium" brand is refused.
++  // The UA string already reports Chrome/<version>; this aligns client hints.
++  brand = "Google Chrome";
+ 
+   std::string brand_version =
+       output_version_type == blink::UserAgentBrandVersionType::kFullVersion
+@@ -195,6 +197,8 @@ const blink::UserAgentBrandList GetUserAgentBrandMajorVersionListInternal(
+ // It helps us avoid introducing individual enterprise policy controls for
+ // sending unified platform for the user agent string.
+ bool ShouldSendUserAgentUnifiedPlatform() {
++  if (base::FeatureList::IsEnabled(blink::features::kReducedSystemInfo))
++    return true;
+   return base::FeatureList::IsEnabled(
+       blink::features::kReduceUserAgentMinorVersion);
+ }
+@@ -643,6 +647,8 @@ std::string GetPlatformForUAMetadata() {
+ }
+ 
+ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
++  if (base::FeatureList::IsEnabled(blink::features::kReducedSystemInfo))
++    only_low_entropy_ch = true;
+   blink::UserAgentMetadata metadata;
+ 
+   // Low entropy client hints.
+diff --git a/chrome/browser/component_updater/BUILD.gn b/chrome/browser/component_updater/BUILD.gn
+index e529ab1098..01fb30a970 100644
+--- a/chrome/browser/component_updater/BUILD.gn
++++ b/chrome/browser/component_updater/BUILD.gn
+@@ -172,6 +172,9 @@ source_set("impl") {
+     "//media",
+     "//services/cert_verifier/public/mojom",
+     "//services/network/public/cpp",
++    # Millie: zip::Unzip, used to extract the bundled Widevine CDM on macOS
++    # (widevine_cdm_component_installer.cc MaybeSeedBundledWidevineCdm).
++    "//third_party/zlib/google:zip",
+   ]
+ 
+   if (safe_browsing_mode == 2) {
+@@ -202,13 +205,6 @@ source_set("impl") {
+     ]
+   }
+ 
+-  if (!is_android && !is_chromeos) {
+-    sources += [ "screen_ai_component_installer.cc" ]
+-    deps += [
+-      "//chrome/browser/screen_ai:screen_ai_install_state",
+-      "//services/screen_ai/public/cpp:utilities",
+-    ]
+-  }
+ 
+   if (use_minikin_hyphenation) {
+     sources += [ "hyphenation_component_installer.cc" ]
+diff --git a/chrome/browser/component_updater/widevine_cdm_component_installer.cc b/chrome/browser/component_updater/widevine_cdm_component_installer.cc
+index 198513af0e..b198bc2a00 100644
+--- a/chrome/browser/component_updater/widevine_cdm_component_installer.cc
++++ b/chrome/browser/component_updater/widevine_cdm_component_installer.cc
+@@ -51,6 +51,16 @@
+ #include "chromeos/ash/components/dbus/image_loader/image_loader_client.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++// Millie: needed to seed the bundled Widevine CDM on first run (see
++// MaybeSeedBundledWidevineCdm below).
++#include "base/apple/bundle_locations.h"
++#include "base/files/file_enumerator.h"
++#include "base/path_service.h"
++#include "chrome/common/chrome_paths.h"
++#include "third_party/zlib/google/zip.h"
++#endif
++
+ #if !BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ #error This file should only be compiled when Widevine CDM component is enabled
+ #endif
+@@ -66,6 +76,69 @@ const uint8_t kWidevineSha2Hash[] = {
+     0x9b, 0xfb, 0x4f, 0xbb, 0x1b, 0xa9, 0xd3, 0x85, 0x37, 0xef};
+ static_assert(std::size(kWidevineSha2Hash) == crypto::kSHA256Length);
+ 
++#if BUILDFLAG(IS_MAC)
++// Millie: seed the bundled Widevine CDM into the user-data dir on first run.
++// ungoogled-chromium's domain substitution disables the component-updater
++// on-demand fetch, so a fresh profile has no CDM and premium DRM (Netflix,
++// DirecTV) fails with "Unsupported keySystem". Millie ships the CDM as an
++// opaque zip in Resources (opaque so notarization doesn't scan the non-hardened
++// Google-signed dylib), and this extracts it into <user-data>/WidevineCdm/
++// BEFORE the component installer scans that directory during registration — so
++// protected playback works on the very first launch, no download, no restart.
++// Runs once: subsequent launches find the CDM present and return immediately.
++void MaybeSeedBundledWidevineCdm() {
++  // First-run only; a one-time ~17MB extraction at startup. Blocking file I/O
++  // here is fine: this is an official (non-DCHECK) build where thread blocking
++  // restrictions are not enforced, and the work runs exactly once per profile.
++  base::FilePath user_data;
++  if (!base::PathService::Get(chrome::DIR_USER_DATA, &user_data)) {
++    return;
++  }
++  const base::FilePath cdm_root = user_data.AppendASCII("WidevineCdm");
++
++  // Already installed (by a previous run or a component update)? Look for a
++  // real arm64 CDM under any version directory.
++  {
++    base::FileEnumerator dirs(cdm_root, /*recursive=*/false,
++                              base::FileEnumerator::DIRECTORIES);
++    for (base::FilePath d = dirs.Next(); !d.empty(); d = dirs.Next()) {
++      if (base::PathExists(d.Append("_platform_specific")
++                               .Append("mac_arm64")
++                               .Append("libwidevinecdm.dylib"))) {
++        return;
++      }
++    }
++  }
++
++  // Locate the CDM zip bundled in the app's Resources.
++  const base::FilePath zip_path = base::apple::OuterBundlePath()
++                                      .Append("Contents")
++                                      .Append("Resources")
++                                      .Append("WidevineCdm.zip");
++  if (!base::PathExists(zip_path)) {
++    return;  // Not bundled (e.g. a bare dev build) — nothing to seed.
++  }
++
++  if (!base::CreateDirectory(cdm_root) || !zip::Unzip(zip_path, cdm_root)) {
++    VLOG(1) << "Millie: failed to extract bundled Widevine CDM.";
++    return;
++  }
++
++  // Write the component hint file for parity with a component-updated install,
++  // pointing at the extracted version directory.
++  base::FileEnumerator dirs(cdm_root, /*recursive=*/false,
++                            base::FileEnumerator::DIRECTORIES);
++  for (base::FilePath d = dirs.Next(); !d.empty(); d = dirs.Next()) {
++    if (base::PathExists(d.Append("manifest.json"))) {
++      base::WriteFile(cdm_root.Append("latest-component-updated-widevine-cdm"),
++                      "{\"Path\":\"" + d.value() + "\"}");
++      break;
++    }
++  }
++  VLOG(1) << "Millie: seeded bundled Widevine CDM into " << cdm_root;
++}
++#endif  // BUILDFLAG(IS_MAC)
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ // On ChromeOS the component updated CDM comes as a disk image which must be
+ // registered and then mounted in order to access the files. The startup
+@@ -437,6 +510,10 @@ void WidevineCdmComponentInstallerPolicy::UpdateCdmPath(
+ }
+ 
+ void RegisterWidevineCdmComponent(ComponentUpdateService* cus) {
++#if BUILDFLAG(IS_MAC)
++  // Ensure the bundled CDM is present before the installer scans for it.
++  MaybeSeedBundledWidevineCdm();
++#endif
+   auto installer = base::MakeRefCounted<ComponentInstaller>(
+       std::make_unique<WidevineCdmComponentInstallerPolicy>());
+   installer->Register(cus, base::OnceClosure());
+diff --git a/components/component_updater/component_updater_url_constants.cc b/components/component_updater/component_updater_url_constants.cc
+index 95c0d48942..a91312bc07 100644
+--- a/components/component_updater/component_updater_url_constants.cc
++++ b/components/component_updater/component_updater_url_constants.cc
+@@ -14,6 +14,13 @@ namespace component_updater {
+ //
+ // The value of |kDefaultUrlSource| can be overridden with
+ // --component-updater=url-source=someurl.
++// Millie: ungoogled's domain substitution rewrites this to a dead domain
++// (update.9oo91eapis.qjz9zk), which silently kills ALL component updates —
++// including the Widevine CDM, so premium DRM streaming can never fetch its
++// module on demand. Restore the real Google endpoint so the component updater
++// works like stock Chrome (Widevine installs on first EME use; CRLSet cert
++// revocation stays fresh). Scoped to Chromium's component list; sync and
++// metrics remain disabled elsewhere.
+ const char kUpdaterJSONDefaultUrl[] =
+     "https://update.googleapis.com/service/update2/json";
+ 

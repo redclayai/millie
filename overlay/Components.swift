@@ -90,6 +90,13 @@ struct Favicon: View {
     /// Curated brand glyph for this page's host, if Millie bundles one.
     private var brandAsset: String? { SiteBrand.asset(forPage: page) }
 
+    /// Favicon rehydrated from the on-disk cache / persisted URL when there's no
+    /// live `image` (restored or asleep tabs). Populated by `.task` below.
+    @State private var resolved: NSImage?
+
+    /// Re-resolve whenever the tab's identity (host + favicon URL) changes.
+    private var resolveKey: String { "\(SiteBrand.host(from: page) ?? "")|\(icon ?? "")" }
+
     var body: some View {
         // Loading is shown by the LoadingBar (loader line) at the bottom of the
         // web card — never by replacing the favicon with a spinner.
@@ -98,6 +105,12 @@ struct Favicon: View {
         .grayscale(active ? 0 : 0.55)
         .opacity(active ? 1 : 0.9)
         .animation(Motion.state, value: active)
+        .task(id: resolveKey) {
+            // Only needed when there's no curated glyph and no live bitmap.
+            guard brandAsset == nil, image == nil, !isInternal else { return }
+            resolved = await FaviconCache.shared.resolve(iconURL: icon,
+                                                         host: SiteBrand.host(from: page))
+        }
     }
 
     /// Millie's internal pages (the new-tab page) have no real favicon; show a
@@ -123,9 +136,10 @@ struct Favicon: View {
                 .interpolation(.high)
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-        } else if let image {
-            // The actual site favicon Chromium downloaded and decoded.
-            Image(nsImage: image)
+        } else if let shown = image ?? resolved {
+            // The actual site favicon: the live bitmap Chromium decoded, or one
+            // rehydrated from the cache / persisted URL for a restored/asleep tab.
+            Image(nsImage: shown)
                 .resizable()
                 .interpolation(.high)
                 .frame(width: size, height: size)
