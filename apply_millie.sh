@@ -14,7 +14,7 @@ echo "==> apply_millie: copying Mori/Millie overlay (incl. thirdparty/Sparkle.fr
 mkdir -p "$SRC/chrome/browser/ui/mori"
 /usr/bin/ditto "$MILLIE/overlay" "$SRC/chrome/browser/ui/mori"
 
-echo "==> apply_millie: applying chromium-tree.patch (12 build/UI files)"
+echo "==> apply_millie: applying chromium-tree.patch (17 build/UI files)"
 cd "$SRC"
 if git apply --check --reverse "$MILLIE/chromium-tree.patch" 2>/dev/null; then
   echo "    already applied — skipping."
@@ -26,7 +26,7 @@ elif patch -p1 --forward --fuzz=3 < "$MILLIE/chromium-tree.patch" >/dev/null 2>&
   echo "    applied (patch --fuzz=3; context drifted slightly — review)."
 else
   echo "!!! apply_millie: chromium-tree.patch did NOT apply — Chromium API drift."
-  echo "!!! One of the 8 build/UI files changed upstream; re-port the patch for this version."
+  echo "!!! One of the 17 build/UI files changed upstream; re-port the patch for this version."
   exit 3
 fi
 echo "==> apply_millie: done."

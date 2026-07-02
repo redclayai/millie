@@ -488,10 +488,11 @@ final class ExtensionStore: ObservableObject {
     // MARK: - Helpers
 
     /// Reported to the Web Store update service so it serves a compatible CRX.
-    static let chromeProdVersion = "148.0"
+    /// Kept aligned with the underlying Chromium build (149).
+    static let chromeProdVersion = "149.0"
     private static let chromeUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        + "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        + "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
     /// Extract the 32-character extension id from a Chrome Web Store detail URL,
     /// or nil if `urlString` isn't such a page. Web Store ids are 32 letters in

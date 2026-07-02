@@ -15,3 +15,6 @@ devid/
 # --- Build + release outputs ---
 dist/
 *.dmg
+
+# Widevine CDM staging (only the built WidevineCdm.zip is tracked)
+widevine/build/
