@@ -27,10 +27,13 @@ struct WebContextMenuRequest: Identifiable {
 // MARK: - Page scripts
 
 enum WebContextScripts {
-    /// Installs a capturing contextmenu listener. It records the target (link,
-    /// image, and/or selection) for every right-click and `preventDefault()`s so
-    /// Chrome's native menu is suppressed and Millie's custom menu can take over
-    /// — including on bare page area, where the native menu wouldn't render.
+    /// Installs a bubble-phase contextmenu listener that HONORS the page. It runs
+    /// after the site's own handlers; if the page already handled the right-click
+    /// (`defaultPrevented` — e.g. Google Docs/Sheets/Figma showing their own menu,
+    /// or a site disabling the menu), Millie stays out of the way. Only when the
+    /// page didn't handle it does Millie record the target + `preventDefault()` so
+    /// its overlay menu takes over — including on bare page area, where Chrome's
+    /// native menu wouldn't render in the non-Views window anyway.
     static let listener = """
     (() => {
       if (window.__moriCtxInstalled) return;
@@ -61,13 +64,23 @@ enum WebContextScripts {
         return bgImage(el) || '';
       };
       document.addEventListener('contextmenu', (e) => {
+        // Only real user right-clicks get Millie's menu. Sites (e.g. n8n's
+        // canvas) dispatch their OWN synthetic contextmenu events to drive a
+        // custom menu; those are untrusted (isTrusted === false) and must be
+        // ignored — Chrome's native menu does the same — otherwise Millie's
+        // menu pops over the site's.
+        if (!e.isTrusted) return;
+        // The page's own handlers already ran (bubble phase). If any of them
+        // handled the right-click — showing a custom menu (Docs/Sheets/Figma)
+        // or deliberately disabling it — the event is defaultPrevented; leave
+        // it alone so the site's menu wins, exactly like Chrome does.
+        if (e.defaultPrevented) return;
         const link = closestLink(e.target);
         const image = imageFor(e.target);
         const selection = String(window.getSelection ? getSelection() : '').trim();
-        // Capture every right-click — link, image, or bare page — and suppress
-        // Chrome's native menu so Millie's overlay menu handles all of them.
-        // (Chromium's native context menu does not render in the non-Views
-        // Mori window, so without this a plain-page right-click shows nothing.)
+        // The page didn't handle it — claim the click for Millie's overlay menu
+        // and suppress the native menu (which wouldn't render in the non-Views
+        // Mori window, so a plain-page right-click would otherwise show nothing).
         window.__moriCtx = {
           seq: ++window.__moriCtxSeq,
           link: link ? link.href : '',
@@ -76,8 +89,7 @@ enum WebContextScripts {
           selection: selection
         };
         e.preventDefault();
-        e.stopPropagation();
-      }, true);
+      }, false);
     })();
     """
 
