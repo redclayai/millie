@@ -532,6 +532,91 @@ enum ExtensionInstallError: LocalizedError {
     }
 }
 
+// MARK: - Chrome Web Store page enhancement
+
+/// Scripts injected on Chrome Web Store extension pages so the store's own
+/// "Add to Chrome" button installs into Millie directly (no separate pill). The
+/// store greys that button and shows "Switch to Chrome" because ungoogled
+/// strips the `chrome.webstorePrivate` API it depends on; rather than restore
+/// that (a fragile, Google-gated path), we detach the button from Google's
+/// `jsaction` delegation, re-enable + relabel it "Add to Millie", hide the
+/// "Switch to Chrome" nudges, and route its click to Millie's own CRX installer
+/// via `window.__moriWebstoreInstall` (polled natively). A MutationObserver
+/// re-applies across the store's SPA re-renders.
+enum WebStoreScripts {
+    static let enhance = """
+    (() => {
+      if (window.__moriWebstoreEnhanced) return;
+      window.__moriWebstoreEnhanced = true;
+      window.__moriWebstoreInstall = '';
+      const extId = () =>
+        (location.pathname.split('/').find(s => s.length === 32 && /^[a-p]+$/.test(s))) || '';
+      const setLabel = (btn, text) => {
+        const walk = (el) => {
+          for (const c of el.children) { if (walk(c)) return true; }
+          if (el.children.length === 0 &&
+              (el.textContent || '').trim().toLowerCase() === 'add to chrome') {
+            el.textContent = text; return true;
+          }
+          return false;
+        };
+        if (!walk(btn)) btn.textContent = text;
+      };
+      const hideNudges = () => {
+        const nodes = document.querySelectorAll('div, section, aside, span');
+        for (const el of nodes) {
+          if (el.__moriHidden) continue;
+          const t = (el.innerText || '').trim().toLowerCase();
+          if (t.length < 140 && el.children.length <= 6 &&
+              (t.includes('switch to chrome to install') ||
+               t.includes('google recommends using chrome'))) {
+            const box = el.closest('[jscontroller]') || el;
+            box.style.display = 'none';
+            box.__moriHidden = true;
+          }
+        }
+      };
+      const hookButton = () => {
+        document.querySelectorAll('button').forEach(btn => {
+          if (btn.__moriHooked) return;
+          if ((btn.innerText || btn.textContent || '').trim().toLowerCase() !== 'add to chrome') return;
+          btn.__moriHooked = true;
+          btn.removeAttribute('jsaction');
+          btn.removeAttribute('jscontroller');
+          btn.disabled = false;
+          btn.removeAttribute('disabled');
+          btn.style.pointerEvents = 'auto';
+          btn.style.opacity = '1';
+          setLabel(btn, 'Add to Millie');
+          btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopImmediatePropagation();
+            const id = extId();
+            if (!id) return;
+            window.__moriWebstoreInstall = id;
+            setLabel(btn, 'Adding…');
+            btn.disabled = true;
+          }, true);
+        });
+      };
+      let scheduled = false;
+      const apply = () => {
+        if (scheduled) return;
+        scheduled = true;
+        setTimeout(() => { scheduled = false; try { hideNudges(); hookButton(); } catch (e) {} }, 150);
+      };
+      apply();
+      new MutationObserver(apply).observe(document.documentElement,
+                                          { childList: true, subtree: true });
+    })();
+    """
+
+    /// Returns (and clears) the extension id the user asked to install by
+    /// clicking the enhanced store button, or "" if none pending.
+    static let read = """
+    (() => { const v = window.__moriWebstoreInstall || ''; window.__moriWebstoreInstall = ''; return v; })();
+    """
+}
+
 // MARK: - Native bridge
 
 /// Entry point the download pipeline calls when a `.crx` finishes downloading,

@@ -16,9 +16,22 @@ extension BrowserStore {
         let timer = Timer.scheduledTimer(withTimeInterval: Self.mediaPollInterval,
                                          repeats: true) { [weak self] _ in
             self?.pollMediaState()
+            self?.pollWebStoreInstall()
         }
         timer.tolerance = 0.3
         mediaPollTimer = timer
+    }
+
+    /// On a Chrome Web Store extension page, pick up a click on the enhanced
+    /// "Add to Millie" button and route it to the same installer the pill uses
+    /// (so per-profile targeting is correct). Only evaluates on store pages.
+    private func pollWebStoreInstall() {
+        guard let tab = selectedTab, tab.hasRealized, !tab.isAsleep,
+              ExtensionStore.webStoreExtensionID(from: tab.urlString) != nil else { return }
+        Task { @MainActor in
+            guard let id = await tab.readWebStoreInstallRequest() else { return }
+            ExtensionStore.shared.beginWebStoreInstall(extensionID: id)
+        }
     }
 
     /// Pull each awake tab's media snapshot and rebroadcast it. Asleep tabs are

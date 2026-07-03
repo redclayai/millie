@@ -261,6 +261,22 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         Task { @MainActor in _ = try? await evaluateMediaJavaScript(MediaAgentScripts.agent) }
     }
 
+    /// On Chrome Web Store extension pages, make the store's own "Add to Chrome"
+    /// button install into Millie (see WebStoreScripts). Idempotent per document.
+    func installWebStoreHook() {
+        guard isRealized else { return }
+        Task { @MainActor in _ = try? await evaluateJavaScript(WebStoreScripts.enhance) }
+    }
+
+    /// Read (and clear) an extension id the user asked to install via the
+    /// enhanced store button; nil when nothing is pending.
+    func readWebStoreInstallRequest() async -> String? {
+        guard isRealized,
+              let result = try? await evaluateJavaScript(WebStoreScripts.read),
+              let id = result as? String, !id.isEmpty else { return nil }
+        return id
+    }
+
     /// Read (and clear) the most recent right-click target. A non-nil result
     /// means the click landed on web content — link, image, text selection, or
     /// bare page — and the caller picks which menu to show. Returns nil only
@@ -482,6 +498,9 @@ extension BrowserTab: MoriBrowserViewDelegate {
         applyBoosts()
         installContextMenuHook()
         installMediaAgent()
+        if ExtensionStore.webStoreExtensionID(from: url) != nil {
+            installWebStoreHook()
+        }
     }
 
     func browserView(_ view: MoriBrowserView,
