@@ -16,5 +16,6 @@ devid/
 dist/
 *.dmg
 
-# Widevine CDM staging (only the built WidevineCdm.zip is tracked)
-widevine/build/
+# Widevine CDM is proprietary (Google) and not redistributable — never
+# commit any of it; release builds stage it locally at package time.
+widevine/
