@@ -64,6 +64,18 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)setExtensionWithId:(NSString*)extensionId
                     pinned:(BOOL)pinned NS_SWIFT_NAME(setExtension(id:pinned:));
 
+/// Whether all extensions are blocked from running on this site — Chrome's
+/// per-site "block extensions here" (`kBlockAllExtensions`). Targets the active
+/// Space's profile; the setting is persisted by Chromium.
++ (BOOL)isSiteBlockedForExtensions:(NSString*)urlString
+    NS_SWIFT_NAME(isSiteBlockedForExtensions(_:));
+
+/// Block or unblock every extension on the given site. A page reload is needed
+/// for the change to take effect on already-loaded content scripts.
++ (void)setSiteBlockedForExtensions:(NSString*)urlString
+                            blocked:(BOOL)blocked
+    NS_SWIFT_NAME(setSiteBlockedForExtensions(_:blocked:));
+
 /// Open the extension's options page the way Chrome would (embedded in
 /// chrome://extensions or as a tab, per the manifest).
 + (BOOL)openOptionsPageForId:(NSString*)extensionId NS_SWIFT_NAME(openOptionsPage(id:));

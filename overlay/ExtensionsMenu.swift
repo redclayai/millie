@@ -189,6 +189,16 @@ struct ExtensionsMenu: View {
                 .frame(maxHeight: 320)
             }
 
+            // Per-site control: block all extensions on the active page — the
+            // fix for sites that break when content scripts inject (e.g.
+            // Netflix's M7111 with Grammarly/1Password).
+            if let url = store.selectedTab?.urlString,
+               url.hasPrefix("http"), let host = SiteBrand.host(from: url) {
+                Hairline().opacity(0.6)
+                SiteBlockToggle(store: store, url: url, host: host)
+                    .id(host)
+            }
+
             Hairline().opacity(0.6)
 
             Button {
@@ -211,6 +221,61 @@ struct ExtensionsMenu: View {
         .frame(width: 300)
         .background(p.popover.color)
         .onAppear { extensions.refresh() }
+    }
+}
+
+/// Per-site "block all extensions here" toggle for the active page. Blocking a
+/// site stops every extension's content scripts from running there (Chrome's
+/// `kBlockAllExtensions`), which fixes sites that misbehave with injected
+/// extensions — e.g. Netflix throwing M7111 when Grammarly/1Password inject
+/// into its player. Reloads the tab so the change takes effect immediately.
+private struct SiteBlockToggle: View {
+    @ObservedObject var store: BrowserStore
+    let url: String
+    let host: String
+
+    @ObservedObject private var extensions = ExtensionStore.shared
+    @Environment(\.palette) private var p
+    @State private var blocked = false
+    @State private var hover = false
+
+    var body: some View {
+        Button {
+            blocked.toggle()
+            extensions.setExtensionsBlocked(blocked, onSite: url)
+            store.reload()
+        } label: {
+            HStack(spacing: 9) {
+                Icon(name: blocked ? "puzzlepiece.extension.fill" : "puzzlepiece.extension",
+                     size: 14, weight: .regular)
+                    .foregroundStyle(blocked ? p.primary.color : p.mutedForeground.color)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Block extensions on this site")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text(host)
+                        .font(Typography.ui(Typography.small))
+                        .foregroundStyle(p.mutedForeground.color)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Toggle("", isOn: .constant(blocked))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .allowsHitTesting(false)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 46)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                    .fill(hover ? p.accent.color.opacity(0.4) : .clear))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Stops all extensions from running on \(host) — fixes sites that break with extensions (e.g. Netflix).")
+        .onAppear { blocked = extensions.areExtensionsBlocked(onSite: url) }
     }
 }
 
