@@ -167,6 +167,22 @@ final class ExtensionStore: ObservableObject {
         MoriChromeExtensions.setExtension(id: ext.id, pinned: !ext.pinned)
     }
 
+    // MARK: - Per-site blocking
+
+    /// Whether all extensions are blocked from running on this site (Chrome's
+    /// per-site "block extensions here"), in the active Space's profile. Useful
+    /// for sites that break with injected content scripts (e.g. Netflix, which
+    /// throws M7111 when Grammarly/1Password inject into its player).
+    func areExtensionsBlocked(onSite urlString: String) -> Bool {
+        MoriChromeExtensions.isSiteBlockedForExtensions(urlString)
+    }
+
+    /// Block or unblock every extension on the site. The caller should reload
+    /// the tab afterward so already-injected content scripts are cleared.
+    func setExtensionsBlocked(_ blocked: Bool, onSite urlString: String) {
+        MoriChromeExtensions.setSiteBlockedForExtensions(urlString, blocked: blocked)
+    }
+
     /// Confirm with the user, then uninstall through Chrome.
     func remove(_ ext: ChromeExtensionInfo) {
         if !suppressDialogs {

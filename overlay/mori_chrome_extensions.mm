@@ -56,7 +56,10 @@
 #include "extensions/browser/install/crx_install_error.h"
 #include "extensions/browser/management_policy.h"
 #include "extensions/browser/permissions/active_tab_permission_granter.h"
+#include "extensions/browser/permissions_manager.h"
 #include "extensions/browser/uninstall_reason.h"
+#include "url/gurl.h"
+#include "url/origin.h"
 #include "extensions/browser/unpacked_installer.h"
 #include "extensions/common/api/extension_action/action_info.h"
 #include "extensions/common/command.h"
@@ -769,6 +772,39 @@ NSString* InstallTypeString(const extensions::Extension& extension) {
   if (model && model->HasAction(action_id)) {
     model->SetActionVisibility(action_id, pinned);
   }
+}
+
++ (BOOL)isSiteBlockedForExtensions:(NSString*)urlString {
+  Profile* profile = MoriProfile();
+  GURL url(base::SysNSStringToUTF8(urlString ?: @""));
+  if (!profile || !url.is_valid()) {
+    return NO;
+  }
+  extensions::PermissionsManager* manager =
+      extensions::PermissionsManager::Get(profile);
+  if (!manager) {
+    return NO;
+  }
+  return manager->GetUserSiteSetting(url::Origin::Create(url)) ==
+         extensions::PermissionsManager::UserSiteSetting::kBlockAllExtensions;
+}
+
++ (void)setSiteBlockedForExtensions:(NSString*)urlString blocked:(BOOL)blocked {
+  Profile* profile = MoriProfile();
+  GURL url(base::SysNSStringToUTF8(urlString ?: @""));
+  if (!profile || !url.is_valid()) {
+    return;
+  }
+  extensions::PermissionsManager* manager =
+      extensions::PermissionsManager::Get(profile);
+  if (!manager) {
+    return;
+  }
+  using UserSiteSetting = extensions::PermissionsManager::UserSiteSetting;
+  manager->UpdateUserSiteSetting(
+      url::Origin::Create(url),
+      blocked ? UserSiteSetting::kBlockAllExtensions
+              : UserSiteSetting::kCustomizeByExtension);
 }
 
 + (BOOL)openOptionsPageForId:(NSString*)extensionId {
