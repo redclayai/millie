@@ -147,9 +147,13 @@ final class MillyAIClient {
             "systemInstruction": ["parts": [["text": systemPrompt]]],
             "contents": contents,
         ]
-        let url = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(key)"
-        var req = URLRequest(url: URL(string: url)!)
+        // Key goes in a header, not the query string — URLs end up in
+        // logs and proxies; headers don't.
+        let url = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"
+        guard let endpoint = URL(string: url) else { throw ClientError.http("Invalid Gemini model name: \(model)") }
+        var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let json = try await sendJSON(req)
@@ -175,13 +179,22 @@ final class MillyAIClient {
 }
 
 /// Minimal Keychain wrapper for API keys (macOS generic password items).
+/// New items carry a service attribute so they can't collide with other
+/// apps' account names; `get`/`delete` query by account only so keys
+/// saved by pre-service builds keep working.
 enum Keychain {
+    private static let service = "app.millie.byok"
+
     static func set(_ value: String, for account: String) {
+        // Account-only delete also clears any legacy (service-less) item.
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account]
         SecItemDelete(q as CFDictionary)
         var add = q
+        add[kSecAttrService as String] = service
         add[kSecValueData as String] = Data(value.utf8)
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        // ThisDeviceOnly: an API key shouldn't ride along in backups or
+        // device transfers — worst case the user re-pastes it.
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         SecItemAdd(add as CFDictionary, nil)
     }
     static func get(_ account: String) -> String? {
