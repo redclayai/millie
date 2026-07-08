@@ -5274,3 +5274,23 @@ index 95c0d48942..a91312bc07 100644
  const char kUpdaterJSONDefaultUrl[] =
      "https://update.googleapis.com/service/update2/json";
  
+diff --git a/chrome/browser/ui/views/passwords/password_bubble_view_base.cc b/chrome/browser/ui/views/passwords/password_bubble_view_base.cc
+index 021bf80424..06243a7ae1 100644
+--- a/chrome/browser/ui/views/passwords/password_bubble_view_base.cc
++++ b/chrome/browser/ui/views/passwords/password_bubble_view_base.cc
+@@ -68,6 +68,15 @@ void PasswordBubbleViewBase::ShowBubble(content::WebContents* web_contents,
+          !g_manage_passwords_bubble_->GetWidget()->IsVisible());
+ 
+   BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
++  // Mori (macOS): normal windows use the non-Views MoriBrowserWindow, which has
++  // no BrowserView/toolbar to anchor to, so GetBrowserViewForBrowser() returns
++  // null and the deref below would crash (same family as the permission-prompt
++  // and read_anything null-derefs). Fail safe: skip the save-password bubble
++  // rather than take down the browser. Non-Mori builds always have a view, so
++  // this guard never fires there.
++  if (!browser_view) {
++    return;
++  }
+   ToolbarButtonProvider* button_provider =
+       browser_view->toolbar_button_provider();
+   views::BubbleAnchor anchor =
