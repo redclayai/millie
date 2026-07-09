@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Package the freshly-built Chromium.app as the branded, asset-complete "Millie"
-# browser at ~/Downloads/Millie.app. Re-runnable after each `ninja chrome`.
+# browser. Output goes to the build tree (NOT ~/Downloads) — macOS TCC blocks
+# the shell from writing to ~/Downloads, which silently left stale builds.
+# Override the location with MILLIE_APP. Re-runnable after each `ninja chrome`.
 # (Product was renamed Mori -> Millie; internal identifiers/asset names that the
 #  Swift code keys on — MoriGlyphs/, the "mori" logo asset — intentionally stay.)
 set -euo pipefail
 
 SRC_APP="/Users/dannybaute/mori-browser-build/build/src/out/Default/Chromium.app"
 OVERLAY="/Users/dannybaute/mori-browser/ungoogled-chromium-macos/build/src/chrome/browser/ui/mori"
-APP="$HOME/Downloads/Millie.app"
+APP="${MILLIE_APP:-$HOME/mori-browser-build/Millie.app}"
 
-echo "==> ditto Chromium.app -> Millie.app"
-rm -rf "$APP" "$HOME/Downloads/MoriBrowser.app"
+echo "==> ditto Chromium.app -> $APP"
+rm -rf "$APP"
 /usr/bin/ditto "$SRC_APP" "$APP"
 
 RES="$APP/Contents/Resources"
