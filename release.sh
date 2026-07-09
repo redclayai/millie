@@ -38,7 +38,7 @@ DL_BASE_URL="${MILLIE_DL_BASE_URL:-https://github.com/redclayai/millie/releases/
 REPO="${MILLIE_REPO:-redclayai/millie}"          # gh repo for --publish
 
 ROOT="$HOME/mori-browser-build"
-SRC_APP="$HOME/Downloads/Millie.app"
+SRC_APP="${MILLIE_APP:-$HOME/mori-browser-build/Millie.app}"  # package_mori.sh output (build tree, not TCC-blocked ~/Downloads)
 SPARKLE_FW="$ROOT/millie/Sparkle.framework"     # vendored by the Sparkle step
 ENT_DIR="$ROOT/entitlements"
 OUT="$ROOT/dist"

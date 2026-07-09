@@ -1,70 +1,99 @@
 import SwiftUI
 
-/// Toolbar entry point for downloads. Hidden until the first download starts,
-/// then reveals a button wrapped in a live progress ring while transfers are
-/// active. The Downloads popover opens on tap, and auto-opens the instant a
-/// download finishes so the user never has to go hunting for the result.
+/// The downloads control in the header: a pill that is BOTH the live download
+/// indicator and the dropdown trigger. It fills blue left→right as active
+/// downloads progress (fully blue briefly on completion); tapping it opens the
+/// Downloads popover. Hidden until the first download, then persists as the
+/// dropdown button (grey with ↓/chevron) when idle.
 struct DownloadsButton: View {
     @ObservedObject var downloads: DownloadStore
     @Binding var isOpen: Bool
     @Environment(\.palette) private var p
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var spin = false
+
+    @State private var completionHold = false   // hold at full-blue briefly on finish
+    @State private var slide = false            // indeterminate sweep
+
+    private let w: CGFloat = 40       // overall control width
+    private let barW: CGFloat = 34    // progress-bar width
+    private let barH: CGFloat = 6
+
+    private var active: Bool { downloads.hasActiveDownloads }
+    private var showProgress: Bool { active || completionHold }
+    private var indeterminate: Bool { downloads.hasIndeterminateActive && !completionHold }
+
+    /// Blue fill for known-size downloads: a dot at the start, growing to the
+    /// full bar at 100% (and on completion).
+    private var fillWidth: CGFloat {
+        let f = completionHold ? 1.0 : downloads.aggregateFraction
+        return min(barW, max(barH, barW * CGFloat(f)))
+    }
 
     var body: some View {
-        Group {
-            if downloads.items.isEmpty {
-                EmptyView()
-            } else {
-                ZStack {
-                    if downloads.hasActiveDownloads {
-                        progressRing
-                    }
-                    IconButton(systemName: glyph,
-                               kind: isOpen ? .primary : .ghost,
-                               size: 28,
-                               help: "Downloads") { isOpen.toggle() }
-                }
+        if downloads.items.isEmpty {
+            EmptyView()
+        } else {
+            Button { isOpen.toggle() } label: { pill }
+                .buttonStyle(.plain)
+                .animation(reduceMotion ? nil : Motion.reveal, value: fillWidth)
+                .animation(Motion.snappy, value: showProgress)
                 .popover(isPresented: $isOpen, arrowEdge: .bottom) {
                     DownloadsPanel(downloads: downloads)
                         .environment(\.palette, p)
                 }
-                .help(downloads.hasActiveDownloads ? "Downloading…" : "Downloads")
+                .help(active ? "Downloading…" : "Downloads")
                 .onChange(of: downloads.completionToken) { _, _ in
-                    isOpen = true
+                    guard !downloads.hasActiveDownloads else { return }
+                    completionHold = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                        if !downloads.hasActiveDownloads { completionHold = false }
+                    }
+                }
+                .onChange(of: indeterminate) { _, ind in driveSlide(ind) }
+                .onAppear { driveSlide(indeterminate) }
+        }
+    }
+
+    private var pill: some View {
+        VStack(spacing: 3) {
+            // ↓ download + ⌄ dropdown icons, spread across the bar width.
+            HStack(spacing: 0) {
+                Icon(name: "arrow.down", size: 12)
+                Spacer(minLength: 0)
+                Icon(name: "chevron.down", size: 9)
+            }
+            .foregroundStyle(p.sidebarForeground.color.opacity(isOpen ? 1 : 0.8))
+            .frame(width: barW)
+            // Progress bar: grey track, blue fill from the left = download progress.
+            ZStack(alignment: .leading) {
+                Capsule().fill(p.mutedForeground.color.opacity(0.3))
+                if showProgress {
+                    if indeterminate {
+                        Capsule().fill(p.primary.color)
+                            .frame(width: barW * 0.4)
+                            .offset(x: slide ? barW * 0.6 : 0)
+                    } else {
+                        Capsule().fill(p.primary.color).frame(width: fillWidth)
+                    }
                 }
             }
+            .frame(width: barW, height: barH)
+            .clipped()
         }
+        .frame(width: w)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
     }
 
-    @ViewBuilder private var progressRing: some View {
-        if downloads.hasIndeterminateActive {
-            // Unknown size: a sweeping arc instead of a fill.
-            Circle()
-                .trim(from: 0, to: 0.7)
-                .stroke(p.primary.color,
-                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .frame(width: 26, height: 26)
-                .rotationEffect(.degrees(spin ? 360 : 0))
-                .animation(reduceMotion ? nil : Motion.spin, value: spin)
-                .onAppear { spin = true }
-        } else {
-            ZStack {
-                Circle()
-                    .stroke(p.primary.color.opacity(0.18), lineWidth: 2)
-                Circle()
-                    .trim(from: 0, to: max(downloads.aggregateFraction, 0.03))
-                    .stroke(p.primary.color,
-                            style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(Motion.reveal, value: downloads.aggregateFraction)
+    private func driveSlide(_ on: Bool) {
+        guard !reduceMotion else { slide = false; return }
+        if on {
+            withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                slide = true
             }
-            .frame(width: 26, height: 26)
+        } else {
+            withAnimation(.default) { slide = false }
         }
-    }
-
-    private var glyph: String {
-        downloads.hasActiveDownloads ? "arrow.down" : "arrow.down.circle"
     }
 }
 

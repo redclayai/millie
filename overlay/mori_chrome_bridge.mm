@@ -10,10 +10,12 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
+#include "base/no_destructor.h"
 #include "base/scoped_observation.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
@@ -705,6 +707,26 @@ content::DownloadManager* MoriDownloadManager() {
              : nullptr;
 }
 
+// Attach a download bridge to `profile`'s DownloadManager unless we're already
+// observing it. Called for the primary profile at startup AND for every
+// isolated Space profile as it's created — otherwise downloads started inside
+// an isolated Space never reach Millie's DownloadStore, so the header download
+// indicator (progress ring + pill) wouldn't appear for them.
+void EnsureDownloadObserverForProfile(Profile* profile) {
+  if (!profile) {
+    return;
+  }
+  content::DownloadManager* manager = profile->GetDownloadManager();
+  if (!manager) {
+    return;
+  }
+  static base::NoDestructor<std::set<content::DownloadManager*>> observed;
+  if (!observed->insert(manager).second) {
+    return;  // already observing this profile's downloads
+  }
+  new MoriDownloadBridge(manager);  // self-owned; lives for the process lifetime
+}
+
 void OnBrowserWindowCreated(Browser* browser) {
   NSLog(@"MORI OnBrowserWindowCreated type=%d existing=%p", (int)browser->type(),
         g_mori_browser);
@@ -853,10 +875,11 @@ void EnsureMoriUIStarted(Browser* browser) {
                 [MoriRoot prepareForTermination];
               }];
 
-  // Chrome's real downloads → Millie's DownloadStore.
-  if (content::DownloadManager* manager = MoriDownloadManager()) {
-    static MoriDownloadBridge* downloads = new MoriDownloadBridge(manager);
-    (void)downloads;
+  // Chrome's real downloads → Millie's DownloadStore. The primary profile is
+  // observed here; each isolated Space profile is observed as it's created (see
+  // MoriBrowserForProfileKey), so downloads in any Space are reflected.
+  if (g_mori_browser) {
+    EnsureDownloadObserverForProfile(g_mori_browser->profile());
   }
 
   // "Millie ▸ Set as Default Browser…" in the application menu.
@@ -938,6 +961,8 @@ static Browser* MoriBrowserForProfileKey(NSString* profileKey) {
   // container; its tabs' native views are reparented into the visible window.
   // Observe its tab strip so engine-created popups land as Millie tabs too.
   browser->tab_strip_model()->AddObserver(mori::MoriTabStripObserver());
+  // Reflect this Space's downloads into DownloadStore too (not just default's).
+  mori::EnsureDownloadObserverForProfile(profile);
   g_profile_browsers[key] = browser;
   NSLog(@"MORI: isolated profile browser key=%s profile=%p browser=%p",
         key.c_str(), profile, browser);
