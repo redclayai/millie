@@ -25,12 +25,14 @@ awk -v inj="\"$MILLIE/apply_millie.sh\"" '
   /sign_and_package_app\.sh/ {
     print "codesign --force --deep --sign - \"$_src_dir/out/Default/Chromium.app\" || true"; next }
   { print }
-' build.sh > "$MILLIE/.build_injected.sh"
+' build.sh > "$ROOT/.build_injected.sh"
 
 echo "==> build_millie: compiling (this can take several hours)"
-bash "$MILLIE/.build_injected.sh" "$@"
+# Run from $ROOT so build.sh's _root_dir (dirname of $0) resolves to the outer
+# repo, where retrieve_and_unpack_resource.sh / ungoogled/ / patches/ live.
+bash "$ROOT/.build_injected.sh" "$@"
 
 echo "==> build_millie: packaging branded Millie.app"
 "$ROOT/package_mori.sh"
 
-echo "==> build_millie: complete — ~/Downloads/Millie.app"
+echo "==> build_millie: complete — Millie.app in the build tree"

@@ -65,6 +65,9 @@ class MoriLocationBar : public LocationBar {
   void Revert() override;
   OmniboxView* GetOmniboxView() override;
   OmniboxController* GetOmniboxController() override;
+  // 150 added GetOmniboxPopupView() as a pure virtual on LocationBar; the Mori
+  // stub has no omnibox popup view, so return null.
+  OmniboxPopupView* GetOmniboxPopupView() override { return nullptr; }
   bool ShouldCloseOmniboxPopup(ui::MouseEvent* event) override;
   content::WebContents* GetWebContents() override;
   LocationBarModel* GetLocationBarModel() override;
@@ -208,9 +211,11 @@ class MoriBrowserWindow : public BrowserWindow {
   void TabDraggingStatusChanged(bool is_dragging) override;
   void LinkOpeningFromGesture(WindowOpenDisposition disposition) override;
   void FocusAppMenu() override;
-  void FocusInactivePopupForAccessibility() override;
-  void RotatePaneFocus(bool forwards) override;
-  void FocusWebContentsPane() override;
+  // 150 removed these from the BrowserWindow interface; kept as no-op members
+  // (definitions remain in the .mm) but no longer 'override'.
+  void FocusInactivePopupForAccessibility();
+  void RotatePaneFocus(bool forwards);
+  void FocusWebContentsPane();
   bool IsTabStripEditable() const override;
   void DisableTabStripEditingForTesting() override;
   bool IsToolbarVisible() const override;
@@ -220,7 +225,7 @@ class MoriBrowserWindow : public BrowserWindow {
   void ShowIntentPickerBubble( std::vector<apps::IntentPickerAppInfo> app_info, bool show_stay_in_chrome, bool show_remember_selection, apps::IntentPickerBubbleType bubble_type, const std::optional<url::Origin>& initiating_origin, IntentPickerResponse callback) override;
   void ShowBookmarkBubble(const GURL& url, bool already_bookmarked) override;
   ShowTranslateBubbleResult ShowTranslateBubble( content::WebContents* contents, translate::TranslateStep step, const std::string& source_language, const std::string& target_language, translate::TranslateErrors error_type, bool is_user_gesture) override;
-  void StartPartialTranslate(const std::string& source_language, const std::string& target_language, const std::u16string& text_selection) override;
+  void StartPartialTranslate(const std::string& source_language, const std::string& target_language, const std::u16string& text_selection);
   DownloadBubbleUIController* GetDownloadBubbleUIController() override;
   void ConfirmBrowserCloseWithPendingDownloads( int download_count, Browser::DownloadCloseType dialog_type, base::OnceCallback<void(bool)> callback) override;
   void ShowAppMenu() override;
