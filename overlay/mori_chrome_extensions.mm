@@ -11,10 +11,12 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
+#include "base/one_shot_event.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/values.h"
 #include "chrome/browser/extensions/api/side_panel/side_panel_service.h"
@@ -49,6 +51,7 @@
 #include "extensions/browser/extension_host.h"
 #include "extensions/browser/extension_host_observer.h"
 #include "extensions/browser/extension_icon_image.h"
+#include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_observer.h"
@@ -178,7 +181,44 @@ class MoriExtensionsStateObserver
     }
     auto* observer = new MoriExtensionsStateObserver(profile);
     (*instances)[profile] = observer;
+    // After a browser update Chromium re-evaluates a sideloaded extension's
+    // permissions and disables it with DISABLE_PERMISSIONS_INCREASE, so the
+    // user's extensions turn off on every update. Millie is a sideload-friendly
+    // browser — re-grant + re-enable them once the extension system is ready.
+    extensions::ExtensionSystem::Get(profile)->ready().Post(
+        FROM_HERE,
+        base::BindOnce(
+            &MoriExtensionsStateObserver::ReEnableAfterPermissionIncrease,
+            profile));
     return observer;
+  }
+
+  // Re-enable extensions Chromium auto-disabled *solely* for a permission
+  // increase (reason 2). An extension the user turned off by hand carries
+  // DISABLE_USER_ACTION too and is left alone.
+  static void ReEnableAfterPermissionIncrease(Profile* profile) {
+    auto* registry = extensions::ExtensionRegistry::Get(profile);
+    auto* prefs = extensions::ExtensionPrefs::Get(profile);
+    auto* registrar = extensions::ExtensionRegistrar::Get(profile);
+    if (!registry || !prefs || !registrar) {
+      return;
+    }
+    std::vector<scoped_refptr<const extensions::Extension>> to_enable;
+    for (const auto& extension : registry->disabled_extensions()) {
+      if (prefs->HasDisableReason(
+              extension->id(),
+              extensions::disable_reason::DISABLE_PERMISSIONS_INCREASE) &&
+          !prefs->HasDisableReason(
+              extension->id(),
+              extensions::disable_reason::DISABLE_USER_ACTION)) {
+        to_enable.push_back(extension);
+      }
+    }
+    for (const auto& extension : to_enable) {
+      registrar->GrantPermissionsAndEnableExtension(*extension);
+      NSLog(@"MORI ext: re-enabled after permission-increase disable: %s",
+            extension->id().c_str());
+    }
   }
 
   // The best currently-loaded icon for an extension, preferring the action's
