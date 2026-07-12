@@ -156,8 +156,13 @@ class MoriAdblockURLLoaderFactory : public network::mojom::URLLoaderFactory {
       mojo::PendingRemote<network::mojom::URLLoaderClient> client,
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation)
       override {
-    if (AdBlockEnabled() && !request.is_outermost_main_frame &&
-        AdBlockShouldBlock(request.url)) {
+    // This proxy is only installed on subresource factories
+    // (kDocumentSubResource/kWorkerSubResource), so every request here is a
+    // subresource — a main-frame/subframe navigation uses a kNavigation factory
+    // and never reaches us. (Do NOT guard on is_outermost_main_frame: that flag
+    // is true for any request originating in the top frame, including its
+    // subresources, so it would suppress all blocking.)
+    if (AdBlockEnabled() && AdBlockShouldBlock(request.url)) {
       g_blocked_count.fetch_add(1, std::memory_order_relaxed);
       PostBlockedNotification();
       // Complete the request as blocked; never open a URLLoader. The queued
