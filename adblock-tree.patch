@@ -1,0 +1,51 @@
+# Millie ad-block: the two Chromium in-tree hunks (fold into
+# chromium-tree.patch on the next 150 regeneration). All other
+# ad-block code lives in overlay/ (mori_adblock.*, AdBlockStore.swift).
+
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -461,6 +461,7 @@
+ #elif BUILDFLAG(IS_MAC)
+ #include "chrome/browser/browser_process_platform_part_mac.h"
+ #include "chrome/browser/enterprise/platform_auth/platform_auth_proxying_url_loader_factory.h"
++#include "chrome/browser/ui/mori/mori_adblock.h"  // Millie built-in ad blocker
+ #include "chrome/common/chrome_version.h"
+ #include "components/enterprise/platform_auth/platform_auth_features.h"
+ #include "components/soda/constants.h"
+@@ -6715,6 +6716,16 @@
+       frame, type == URLLoaderFactoryType::kNavigation, request_initiator,
+       isolation_info, factory_builder);
+ 
++#if BUILDFLAG(IS_MAC)
++  // Millie built-in ad/tracker blocker: proxy subresource factories so ad hosts
++  // are cancelled before they hit the network. Self-gates on the "Block ads"
++  // setting.
++  mori::MaybeProxyAdblock(
++      factory_builder,
++      type == URLLoaderFactoryType::kDocumentSubResource ||
++          type == URLLoaderFactoryType::kWorkerSubResource);
++#endif
++
+ #if BUILDFLAG(ENABLE_CAPTIVE_PORTAL_DETECTION)
+   if (disable_secure_dns) {
+     WebContents* web_contents = WebContents::FromRenderFrameHost(frame);
+
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -3221,6 +3221,8 @@
+       # Mori overlay: native SwiftUI browser chrome bridge (see mori/).
+       "mori/MoriBrowserView.h",
+       "mori/MoriPrivacy.h",
++      "mori/mori_adblock.h",
++      "mori/mori_adblock.mm",
+       "mori/mori_browser_window.h",
+       "mori/mori_browser_window.mm",
+       "mori/mori_chrome_bridge.mm",
+@@ -5752,6 +5754,7 @@
+       "mori/AirTrafficControl.swift",
+       "mori/ArchiveStore.swift",
+       "mori/BookmarkStore.swift",
++      "mori/AdBlockStore.swift",
+       "mori/BoostStore.swift",
+       "mori/Boosts.swift",
+       "mori/BrowserAutomation.swift",

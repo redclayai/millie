@@ -40,6 +40,14 @@ if [ -f "$THREATLIST" ]; then
   echo "    bundled threatlist.bin ($(du -h "$THREATLIST" | cut -f1))"
 fi
 
+# Offline ad/tracker host blocklist — the built-in ad blocker (mori_adblock.mm)
+# loads Bundle.main/adhosts.bin.
+ADHOSTS="/Users/dannybaute/mori-browser-build/millie/overlay/adhosts.bin"
+if [ -f "$ADHOSTS" ]; then
+  /usr/bin/ditto "$ADHOSTS" "$RES/adhosts.bin"
+  echo "    bundled adhosts.bin ($(du -h "$ADHOSTS" | cut -f1))"
+fi
+
 # Bundled Widevine CDM (arm64), shipped as an opaque zip so notarization does
 # not scan the non-hardened Google-signed dylib. On first launch the browser
 # extracts it into <user-data>/WidevineCdm (widevine_cdm_component_installer.cc
