@@ -10,9 +10,11 @@
 #endif
 
 #include <string>
+#include <vector>
 
 class Browser;
 class Profile;
+class GURL;
 
 namespace mori {
 
@@ -43,6 +45,15 @@ Browser* ActiveBrowser();
 // "Millie-<key>" profile. Used by cross-profile operations (e.g. install an
 // extension into every Profile).
 Profile* ProfileForKey(const std::string& key);
+
+// Route externally-opened URLs (link clicks from other apps, `open <url>`,
+// the GURL Apple Event) into the Millie UI as tabs in the active Space, and
+// bring the window forward. Returns true if Millie handled them (its UI is
+// up); false to let Chrome's default open path run (e.g. during early startup).
+// Called from app_controller_mac.mm's OpenUrlsInBrowserWithProfile — Chrome's
+// default path creates an unobserved Browser whose tab never becomes a Millie
+// tab, so the link appears to do nothing.
+bool OpenExternalUrls(const std::vector<GURL>& urls);
 
 #ifdef __OBJC__
 // The shared Millie main window (used for GetNativeWindow / dialog parenting).

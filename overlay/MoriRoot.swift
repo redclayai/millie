@@ -240,6 +240,10 @@ final class MoriRoot: NSObject {
     static func openNewTab(url: String) {
         shared?.store.newTab(url: url.isEmpty ? "about:blank" : url, select: true)
     }
+    /// True once the SwiftUI root (and its store) exists, so openNewTabWithURL:
+    /// will actually create a tab. Used by the external-URL handler to defer
+    /// links that arrive during a cold launch until the UI is ready.
+    @objc static func uiReady() -> Bool { shared != nil }
     @objc static func closeCurrentTab() {
         if let id = shared?.store.selectedTabID { shared?.store.closeTab(id) }
     }
