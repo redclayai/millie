@@ -1,0 +1,29 @@
+# Millie external-URL fix: the one Chromium in-tree hunk (fold into
+# chromium-tree.patch on the next 150 regeneration). All other code is in
+# overlay/ (mori_chrome_bridge.mm OpenExternalUrls, mori_chrome_hooks.h,
+# MoriRoot.swift uiReady).
+
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -70,6 +70,7 @@
+ #include "chrome/browser/task_manager/task_manager_metrics_recorder.h"
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
++#include "chrome/browser/ui/mori/mori_chrome_hooks.h"  // Millie external-URL routing
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_live_tab_context.h"
+ #include "chrome/browser/ui/browser_mac.h"
+@@ -2561,6 +2562,13 @@
+ 
+ void OpenUrlsInBrowserWithProfile(const std::vector<GURL>& urls,
+                                   Profile* profile) {
++  // Millie: route externally-opened URLs (link clicks, `open <url>`, GURL
++  // Apple Event) into the active Space. Chrome's default path below finds no
++  // tabbed browser for the Mori window and opens the tab in a fresh, unobserved
++  // Browser that never becomes a Millie tab — so the link appears to do nothing.
++  if (mori::OpenExternalUrls(urls)) {
++    return;
++  }
+   if (!profile)
+     return;  // No suitable profile to open the URLs, do nothing.
+   // Prefer a regular (non-incognito) profile

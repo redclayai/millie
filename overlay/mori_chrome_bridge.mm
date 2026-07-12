@@ -76,6 +76,7 @@
                            modifierMask:(NSUInteger)modifierMask;
 + (void)newTab;
 + (void)openNewTabWithURL:(NSString*)url;
++ (BOOL)uiReady;
 + (void)goBack;
 + (void)goForward;
 + (void)toggleSidebar;
@@ -904,6 +905,65 @@ NSWindow* MoriMainWindow() {
 
 Browser* MoriBrowser() {
   return g_mori_browser;
+}
+
+// Links that arrived before MoriRoot's UI existed (cold launch).
+static std::vector<std::string>& PendingExternalUrls() {
+  static base::NoDestructor<std::vector<std::string>> urls;
+  return *urls;
+}
+
+// Open every stashed URL as a tab in the active Space, then bring Millie
+// forward. If the UI isn't up yet (cold launch), retry on the main queue until
+// it is (bounded so a windowless/background launch doesn't spin forever).
+static void FlushPendingExternalUrls(int attempts_left) {
+  @autoreleasepool {
+    if (![MoriRoot uiReady]) {
+      if (attempts_left <= 0) {
+        PendingExternalUrls().clear();
+        return;
+      }
+      dispatch_after(
+          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+          dispatch_get_main_queue(),
+          ^{ FlushPendingExternalUrls(attempts_left - 1); });
+      return;
+    }
+    std::vector<std::string>& pending = PendingExternalUrls();
+    const bool opened = !pending.empty();
+    for (const std::string& spec : pending) {
+      [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(spec)];
+    }
+    pending.clear();
+    if (opened && g_main_window) {
+      [NSApp activateIgnoringOtherApps:YES];
+      [g_main_window makeKeyAndOrderFront:nil];
+    }
+  }
+}
+
+bool OpenExternalUrls(const std::vector<GURL>& urls) {
+  std::vector<std::string> specs;
+  for (const GURL& url : urls) {
+    if (url.is_valid()) {
+      specs.push_back(url.spec());
+    }
+  }
+  if (specs.empty()) {
+    return false;  // nothing usable — let Chrome's default path run
+  }
+  NSLog(@"MORI OpenExternalUrls n=%zu uiReady=%d", specs.size(),
+        [MoriRoot uiReady] ? 1 : 0);
+  // Route to the active Space's own tab creation (same path the omnibox and
+  // window.open adoption use) instead of Chrome's OpenUrlsInBrowser, which
+  // creates an unobserved Browser whose tab never becomes a Millie tab (the
+  // "link click does nothing / just flashes" bug). Stash + flush so cold
+  // launches (UI not up yet) work too.
+  std::vector<std::string>& pending = PendingExternalUrls();
+  pending.insert(pending.end(), specs.begin(), specs.end());
+  dispatch_async(dispatch_get_main_queue(),
+                 ^{ FlushPendingExternalUrls(/*attempts_left=*/50); });
+  return true;  // Millie owns these; don't let Chrome open an unobserved window
 }
 
 }  // namespace mori
