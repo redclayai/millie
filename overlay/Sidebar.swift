@@ -65,8 +65,17 @@ struct Sidebar: View {
                                 .padding(rowInsets(8))
                         }
 
-                        if !store.folders.isEmpty {
+                        if store.folders.contains(where: { !$0.isTidy }) {
                             FolderSection(store: store, draggingTabID: $draggingTabID)
+                                .padding(rowInsets(8))
+                            SidebarSeparator()
+                                .padding(rowInsets(8))
+                        }
+
+                        // Tidy groups sit BELOW the folders line: temporary,
+                        // distinct from permanent folders.
+                        if store.folders.contains(where: { $0.isTidy }) {
+                            TidySection(store: store, draggingTabID: $draggingTabID)
                                 .padding(rowInsets(8))
                             SidebarSeparator()
                                 .padding(rowInsets(8))
@@ -453,7 +462,40 @@ private struct FolderSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(store.folders) { folder in
+            // Permanent, user-made folders only. Tidy groups render separately
+            // in TidySection, below the folders separator.
+            ForEach(store.folders.filter { !$0.isTidy }) { folder in
+                FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
+            }
+        }
+    }
+}
+
+/// The "Tidy Tabs" result: temporary auto-groups, shown below the folders
+/// separator with a quiet header and a Clear action — kept visually distinct
+/// from permanent folders (a different feature).
+private struct TidySection: View {
+    @ObservedObject var store: BrowserStore
+    @Binding var draggingTabID: BrowserTab.ID?
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text("TIDIED")
+                    .font(Typography.ui(Typography.caption, weight: .bold))
+                    .tracking(1.2)
+                    .foregroundStyle(p.mutedForeground.color.opacity(0.85))
+                Spacer(minLength: 0)
+                Button("Clear") { store.clearTidyGroups() }
+                    .buttonStyle(.plain)
+                    .font(Typography.ui(Typography.caption, weight: .medium))
+                    .foregroundStyle(p.primary.color)
+                    .help("Ungroup — return these tabs to the list")
+            }
+            .padding(.horizontal, 9)
+            .padding(.bottom, 2)
+            ForEach(store.folders.filter { $0.isTidy }) { folder in
                 FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
             }
         }
@@ -492,29 +534,39 @@ private struct FolderRow: View {
         VStack(alignment: .leading, spacing: 4) {
             // Folder header row.
             HStack(spacing: 8) {
-                MorphingFolderIcon(
-                    isOpen: folder.isExpanded,
-                    showsDots: !folder.isExpanded && containsActiveTab,
-                    symbol: folder.symbol,
-                    faviconIcon: representativeTab?.faviconURL,
-                    faviconPage: representativeTab?.urlString,
-                    faviconImage: representativeTab?.faviconImage,
-                    size: 24,
-                    frontColor: p.primary.color.opacity(0.18),
-                    backColor: p.primary.color.opacity(0.32),
-                    stroke: p.sidebarForeground.color.opacity(0.55),
-                    glyphColor: p.sidebarForeground.color.opacity(0.85),
-                    surface: p.sidebar.color
-                )
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
-                // Clicking the folder icon itself opens the icon picker
-                // (Arc behavior); the rest of the row still toggles.
-                .onTapGesture { showIconPicker = true }
-                .popover(isPresented: $showIconPicker, arrowEdge: .bottom) {
-                    FolderIconPicker(store: store, folder: folder,
-                                     isPresented: $showIconPicker)
-                        .environment(\.palette, p)
+                if folder.isTidy {
+                    // Tidy group: a distinct grouping glyph (NOT the folder
+                    // icon) — this is a temporary auto-group, a different
+                    // feature from folders. No icon picker.
+                    Icon(name: "rectangle.3.group", size: 15)
+                        .foregroundStyle(p.mutedForeground.color)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                } else {
+                    MorphingFolderIcon(
+                        isOpen: folder.isExpanded,
+                        showsDots: !folder.isExpanded && containsActiveTab,
+                        symbol: folder.symbol,
+                        faviconIcon: representativeTab?.faviconURL,
+                        faviconPage: representativeTab?.urlString,
+                        faviconImage: representativeTab?.faviconImage,
+                        size: 24,
+                        frontColor: p.primary.color.opacity(0.18),
+                        backColor: p.primary.color.opacity(0.32),
+                        stroke: p.sidebarForeground.color.opacity(0.55),
+                        glyphColor: p.sidebarForeground.color.opacity(0.85),
+                        surface: p.sidebar.color
+                    )
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+                    // Clicking the folder icon itself opens the icon picker
+                    // (Arc behavior); the rest of the row still toggles.
+                    .onTapGesture { showIconPicker = true }
+                    .popover(isPresented: $showIconPicker, arrowEdge: .bottom) {
+                        FolderIconPicker(store: store, folder: folder,
+                                         isPresented: $showIconPicker)
+                            .environment(\.palette, p)
+                    }
                 }
 
                 if isEditing {

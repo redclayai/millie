@@ -1,0 +1,34 @@
+# Millie File-menu command routing: the one Chromium in-tree hunk (fold into
+# chromium-tree.patch on the next 150 regen). Routes IDC_NEW_TAB/NEW_WINDOW/
+# NEW_INCOGNITO_WINDOW/RESTORE_TAB/FOCUS_LOCATION/CLOSE_TAB to mori::
+# HandleBrowserCommand. All other code is in overlay/.
+
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -55,6 +55,9 @@
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_actions.h"
+ #include "chrome/browser/ui/browser_commands.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/ui/mori/mori_chrome_hooks.h"  // Millie incognito routing
++#endif
+ #include "chrome/browser/ui/browser_element_identifiers.h"
+ #include "chrome/browser/ui/browser_finder.h"
+ #include "chrome/browser/ui/browser_select_file_dialog_controller.h"
+@@ -619,6 +622,16 @@
+     return false;
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // Millie: route File-menu commands that don't fit the Spaces / non-Views
++  // chrome (new tab/window/incognito, reopen closed tab, open location, close
++  // tab) to the SwiftUI store. Chrome's own handlers open unobserved windows or
++  // assume a Views browser, so they silently do nothing here.
++  if (mori::HandleBrowserCommand(id)) {
++    return true;
++  }
++#endif
++
+   // No commands are enabled if there is not yet any selected tab.
+   // TODO(pkasting): It seems like we should not need this, because either
+   // most/all commands should not have been enabled yet anyway or the ones that

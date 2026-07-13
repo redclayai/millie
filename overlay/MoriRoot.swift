@@ -244,6 +244,10 @@ final class MoriRoot: NSObject {
     /// will actually create a tab. Used by the external-URL handler to defer
     /// links that arrive during a cold launch until the UI is ready.
     @objc static func uiReady() -> Bool { shared != nil }
+    /// File-menu "New Incognito Window" (⇧⌘N) → Millie's private Space.
+    @objc static func newPrivateWindow() { shared?.store.openPrivateWindow() }
+    /// File-menu "New Window" (⌘N) → Millie's New Context (Space) flow.
+    @objc static func newWindow() { shared?.store.contextCreationVisible = true }
     @objc static func closeCurrentTab() {
         if let id = shared?.store.selectedTabID { shared?.store.closeTab(id) }
     }
