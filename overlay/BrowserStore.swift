@@ -358,6 +358,19 @@ final class BrowserStore: ObservableObject {
             contexts = [context]
             activeContextID = context.id
         }
+        // Back-fill folder-home for items pinned before folderHomeURL was
+        // tracked: their resting URL (where they sit at launch) becomes the
+        // icon-reset target, so an existing item resets to its real path — not
+        // just the site root. New pins already record their exact URL.
+        for context in contexts {
+            for folder in context.folders {
+                for tid in folder.tabIDs {
+                    if let t = tab(for: tid), t.folderHomeURL == nil {
+                        t.folderHomeURL = t.urlString
+                    }
+                }
+            }
+        }
         return true
     }
 
