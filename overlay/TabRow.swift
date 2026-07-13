@@ -16,6 +16,9 @@ struct TabRow: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    /// Tapping the favicon. For foldered tabs this resets to the folder's
+    /// original URL; when nil (loose tabs) a favicon tap just selects the row.
+    var onIconTap: (() -> Void)? = nil
 
     @Environment(\.palette) private var p
     @Environment(\.colorScheme) private var scheme
@@ -37,6 +40,12 @@ struct TabRow: View {
                     active: (isSelected || hovering) && !tab.isAsleep)
                 .grayscale(tab.isAsleep ? 1 : 0)
                 .opacity(tab.isAsleep ? 0.5 : 1)
+                // A plain tap gesture (not a Button) so it coexists with the
+                // row's .onDrag. Foldered tabs reset to their original page;
+                // loose tabs just select.
+                .contentShape(Rectangle())
+                .onTapGesture { (onIconTap ?? onSelect)() }
+                .help(onIconTap != nil ? "Back to this folder item’s original page" : "")
 
             if isEditing {
                 TextField("Name", text: $draftName)

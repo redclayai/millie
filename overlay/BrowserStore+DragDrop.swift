@@ -59,6 +59,10 @@ extension BrowserStore {
                 let clamped = min(max(adjusted, 0), folders[fi].tabIDs.count)
                 folders[fi].tabIDs.insert(id, at: clamped)
                 folders[fi].isExpanded = true
+                // Remember the URL it was dropped in at, for the folder-icon reset.
+                if let t = tab(for: id), t.folderHomeURL == nil {
+                    t.folderHomeURL = t.urlString
+                }
 
             case .loose(let index):
                 // The tab is now loose (removed from pinned/folders above).

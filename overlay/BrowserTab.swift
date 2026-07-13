@@ -12,6 +12,10 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     /// page title for display; nil means "follow the page title". Persisted.
     @Published var customTitle: String?
     @Published var urlString: String
+    /// For a tab that lives in a folder: the canonical/original URL it had when
+    /// it was added. Clicking the folder icon resets the tab here. Nil for tabs
+    /// never placed in a folder (reset then falls back to the site origin).
+    var folderHomeURL: String?
     @Published var isLoading: Bool = false
     @Published var canGoBack: Bool = false
     @Published var canGoForward: Bool = false

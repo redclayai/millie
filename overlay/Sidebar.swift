@@ -570,7 +570,8 @@ private struct FolderRow: View {
                         store: store,
                         isSelected: tab.id == store.selectedTabID,
                         onSelect: { store.selectTab(tab.id) },
-                        onClose: { store.closeTab(tab.id, allowFolderRemoval: true) }
+                        onClose: { store.closeTab(tab.id, allowFolderRemoval: true) },
+                        onIconTap: { store.resetFolderedTabToHome(tab.id) }
                     )
                     .padding(.leading, 16)
                     .transition(.tabClose)
@@ -780,7 +781,7 @@ struct TabMenu: View {
         Button("Close Tabs to Right") { store.closeTabsToRight(of: tab.id) }
             .disabled(!store.hasClosableTabsToRight(of: tab.id))
         Button("Close Tab", role: .destructive) {
-            store.closeTab(tab.id, allowFolderRemoval: true)
+            store.closeTab(tab.id, forceRemove: true)
         }
     }
 }
