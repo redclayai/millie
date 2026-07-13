@@ -148,6 +148,8 @@ final class BrowserStore: ObservableObject {
         /// Last known favicon URL, so a restored-but-unopened tab can show its
         /// real icon (via the remote-load path) without realizing a CEF browser.
         var faviconURL: String?
+        /// Canonical/original URL for a foldered tab (folder-icon reset target).
+        var folderHomeURL: String? = nil
     }
 
     private struct PersistedSession: Codable {
@@ -308,6 +310,7 @@ final class BrowserStore: ObservableObject {
                 // Seed the last-known icon so the tab shows it immediately,
                 // before (or without) the browser ever being realized.
                 tab.faviconURL = persisted.faviconURL
+                tab.folderHomeURL = persisted.folderHomeURL
                 tab.customTitle = persisted.customTitle
                 return tab
             }
@@ -415,7 +418,7 @@ final class BrowserStore: ObservableObject {
             snapshot[idx].selectedTabID = selectedTabID
         }
         let state = PersistedSession(
-            tabs: tabs.filter { !privateTabIDs.contains($0.id) }.map { PersistedTab(id: $0.id, url: $0.urlString, title: $0.title, customTitle: $0.customTitle, profileKey: $0.profileKey, faviconURL: $0.faviconURL) },
+            tabs: tabs.filter { !privateTabIDs.contains($0.id) }.map { PersistedTab(id: $0.id, url: $0.urlString, title: $0.title, customTitle: $0.customTitle, profileKey: $0.profileKey, faviconURL: $0.faviconURL, folderHomeURL: $0.folderHomeURL) },
             selectedTabID: selectedTabID,
             profiles: profiles,
             contexts: snapshot,
@@ -643,21 +646,30 @@ final class BrowserStore: ObservableObject {
 
     func closeTab(_ id: BrowserTab.ID,
                   allowPinned: Bool = false,
-                  allowFolderRemoval: Bool = false) {
+                  allowFolderRemoval: Bool = false,
+                  forceRemove: Bool = false) {
         if id == splitTabID || id == selectedTabID { splitTabID = nil }
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
         // Pinned tabs are permanent: a close gesture (Cmd-W, close button) is
         // ignored. They can only be removed by explicitly unpinning them.
         if contexts.contains(where: { $0.pinnedTabIDs.contains(id) }), !allowPinned { return }
-        // Tabs inside a folder are a persistent collection (Zen-style): Cmd-W
-        // doesn't remove them. Instead the tab unloads its content and selection
-        // moves to a neighbour, leaving it in the folder to reopen. The row's ×
-        // button and the "Close Tab" menu item pass allowFolderRemoval to fall
-        // through to a real close.
-        if !allowFolderRemoval,
+        // Tabs inside a folder are a persistent collection (Zen/Arc-style).
+        // Closing KEEPS the entry: an awake tab unloads (sleeps, staying pinned
+        // in the folder) on the first close; an already-asleep tab is removed
+        // only by the × button (allowFolderRemoval) on a second press — Cmd-W
+        // leaves it. `forceRemove` (the "Close Tab" menu item / bulk closes)
+        // removes it immediately regardless.
+        if !forceRemove,
            contexts.contains(where: { $0.folders.contains { $0.tabIDs.contains(id) } }) {
-            unloadFolderedTab(id)
-            return
+            let asleep = tab(for: id)?.isAsleep ?? false
+            if !asleep {
+                unloadFolderedTab(id)   // first close → keep pinned, just unload
+                return
+            }
+            if !allowFolderRemoval {
+                return                  // Cmd-W on an already-unloaded tab: keep it
+            }
+            // asleep + × button → fall through to a real close (removes it)
         }
         let tab = tabs[idx]
         // Propagate this close to other devices (incognito tabs never sync).
@@ -745,6 +757,27 @@ final class BrowserStore: ObservableObject {
         withAnimation(Motion.snappy) { tab.sleep() }
         media.forgetTab(browserId: mediaBrowserId)
         scheduleSessionSave()
+    }
+
+    /// Folder-icon tap: send a foldered tab back to its original ("home") URL —
+    /// the URL it had when added to the folder, or the site origin as a fallback
+    /// for entries pinned before this was tracked. Selects (and wakes) the tab.
+    func resetFolderedTabToHome(_ id: BrowserTab.ID) {
+        guard let tab = tab(for: id) else { return }
+        let home = tab.folderHomeURL ?? Self.originURL(of: tab.urlString)
+        selectTab(id)
+        if !home.isEmpty { tab.load(home) }
+    }
+
+    /// `scheme://host[:port]/` for a URL string, or "" if it has no host.
+    static func originURL(of urlString: String) -> String {
+        guard let comps = URLComponents(string: urlString),
+              let scheme = comps.scheme, let host = comps.host, !host.isEmpty else {
+            return ""
+        }
+        var s = "\(scheme)://\(host)"
+        if let port = comps.port { s += ":\(port)" }
+        return s + "/"
     }
 
     func moveTab(from source: IndexSet, to destination: Int) {
@@ -1061,7 +1094,7 @@ final class BrowserStore: ObservableObject {
 
     // MARK: - Pinned tabs & folders
 
-    private func tab(for id: BrowserTab.ID) -> BrowserTab? {
+    func tab(for id: BrowserTab.ID) -> BrowserTab? {
         tabs.first { $0.id == id }
     }
 
@@ -1195,6 +1228,10 @@ final class BrowserStore: ObservableObject {
             folders[idx].tabIDs.append(tabID)
             folders[idx].isExpanded = true
         }
+        // Remember the URL it was pinned at so the folder-icon tap can reset here.
+        if let t = tab(for: tabID), t.folderHomeURL == nil {
+            t.folderHomeURL = t.urlString
+        }
         scheduleSessionSave()
     }
 
@@ -1268,7 +1305,7 @@ final class BrowserStore: ObservableObject {
                 keeperByKey[key] = tab.id
             }
         }
-        for id in toClose { closeTab(id, allowFolderRemoval: true) }
+        for id in toClose { closeTab(id, forceRemove: true) }
         return toClose.count
     }
 
@@ -1380,7 +1417,7 @@ final class BrowserStore: ObservableObject {
     func detachedWindowDidClose(_ controller: DetachedTabWindowController) {
         let id = controller.tab.id
         controller.tab.isDetached = false
-        closeTab(id, allowPinned: true, allowFolderRemoval: true)
+        closeTab(id, allowPinned: true, forceRemove: true)
         scheduleSessionSave()
         DispatchQueue.main.async { [weak self] in
             self?.detachedControllers[id] = nil
