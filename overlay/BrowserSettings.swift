@@ -102,7 +102,7 @@ final class BrowserSettings: ObservableObject {
 
     static let minSidebarWidth: CGFloat = 200
     static let maxSidebarWidth: CGFloat = 420
-    static let defaultSidebarWidth: CGFloat = 256
+    static let defaultSidebarWidth: CGFloat = 264
 
     /// The user's custom gradient theme (chrome wash + derived accent). Empty
     /// means "no custom theme" — the chrome uses the plain light/dark tint.

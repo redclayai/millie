@@ -333,7 +333,7 @@ private enum LauncherMetrics {
     }
 
     /// Solid accent for the highlighted result (Spotlight/Dia-style blue).
-    static let accent = Color(.sRGB, red: 0.24, green: 0.37, blue: 0.99, opacity: 1)
+    static let accent = Color(.sRGB, red: 0.243, green: 0.416, blue: 0.882, opacity: 1)
 }
 
 /// AppKit-backed launcher input. SwiftUI `@FocusState` is timing-sensitive when

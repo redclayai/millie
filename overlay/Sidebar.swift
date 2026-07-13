@@ -702,7 +702,7 @@ private struct NewTabRow: View {
             }
             .padding(.leading, 9)
             .padding(.trailing, 6)
-            .frame(height: 34)
+            .frame(height: 38)
             .background(
                 RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
                     .fill(hovering ? p.foreground.color.opacity(0.05) : .clear)
