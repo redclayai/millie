@@ -55,6 +55,15 @@ Profile* ProfileForKey(const std::string& key);
 // tab, so the link appears to do nothing.
 bool OpenExternalUrls(const std::vector<GURL>& urls);
 
+// Route a Chrome browser command (an IDC_* id) to the matching Millie action
+// for the File-menu commands that don't fit the non-Views/Spaces chrome — new
+// tab/window/incognito-window, reopen-closed-tab, open-location, close-tab.
+// Chrome's own handlers create unobserved windows or assume a Views browser, so
+// they do nothing in Millie. Returns true if Millie handled it (its UI is up);
+// false to let Chrome's default command run. Called from
+// BrowserCommandController::ExecuteCommandWithDisposition.
+bool HandleBrowserCommand(int command_id);
+
 #ifdef __OBJC__
 // The shared Millie main window (used for GetNativeWindow / dialog parenting).
 NSWindow* MoriMainWindow();

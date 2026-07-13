@@ -1165,11 +1165,22 @@ final class BrowserStore: ObservableObject {
     // MARK: Folder management
 
     @discardableResult
-    func addFolder(name: String = "New Folder") -> TabFolder {
-        let folder = TabFolder(name: name, isExpanded: true)
+    func addFolder(name: String = "New Folder", isTidy: Bool = false) -> TabFolder {
+        let folder = TabFolder(name: name, isExpanded: true, isTidy: isTidy)
         withAnimation(Motion.snappy) { folders.append(folder) }
         scheduleSessionSave()
         return folder
+    }
+
+    /// Dissolve all "Tidy Tabs" groups in the active Space: their tabs return to
+    /// the loose list and the temporary groups are removed. (Permanent, user-made
+    /// folders are never touched.)
+    func clearTidyGroups() {
+        guard folders.contains(where: { $0.isTidy }) else { return }
+        withAnimation(Motion.snappy) {
+            folders.removeAll { $0.isTidy }
+        }
+        scheduleSessionSave()
     }
 
     @discardableResult
@@ -1338,9 +1349,12 @@ final class BrowserStore: ObservableObject {
         var moved = 0
         for site in order {
             guard let ids = bySite[site], ids.count >= 2 else { continue }
+            // Reuse an existing TIDY group for this site; never fold into a
+            // permanent user folder that happens to share the name. New groups
+            // are marked isTidy so they render in the temporary section.
             let folder = folders.first {
-                $0.name.caseInsensitiveCompare(site) == .orderedSame
-            } ?? addFolder(name: site)
+                $0.isTidy && $0.name.caseInsensitiveCompare(site) == .orderedSame
+            } ?? addFolder(name: site, isTidy: true)
             for id in ids {
                 addTab(id, toFolder: folder.id)
                 moved += 1

@@ -578,7 +578,13 @@ enum MoriCommands {
             MoriShortcut("closeTab", modifiers: .command, key: "w") {
                 if let id = $0.selectedTabID { $0.closeTab(id) }
             },
-            MoriShortcut("newPrivateWindow", modifiers: [.command, .shift], key: "n") {
+            MoriShortcut("newPrivateWindow",
+                         modifiers: [.command, .shift],
+                         key: "n",
+                         // ⌘⇧N is Chrome's built-in "New Incognito Window"; reserve
+                         // it or the engine eats it and opens its own (invisible,
+                         // non-Views) window instead of our private Space.
+                         reservesChromiumShortcut: true) {
                 $0.openPrivateWindow()
             },
             MoriShortcut("focusOmnibox",

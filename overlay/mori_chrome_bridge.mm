@@ -21,6 +21,7 @@
 #include "base/strings/sys_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
+#include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/devtools/devtools_window.h"
 #include "chrome/browser/download/download_core_service_factory.h"
 #include "chrome/browser/shell_integration.h"
@@ -76,6 +77,11 @@
                            modifierMask:(NSUInteger)modifierMask;
 + (void)newTab;
 + (void)openNewTabWithURL:(NSString*)url;
++ (void)newWindow;
++ (void)newPrivateWindow;
++ (void)reopenClosedTab;
++ (void)focusOmnibox;
++ (void)closeCurrentTab;
 + (BOOL)uiReady;
 + (void)goBack;
 + (void)goForward;
@@ -939,6 +945,21 @@ static void FlushPendingExternalUrls(int attempts_left) {
       [NSApp activateIgnoringOtherApps:YES];
       [g_main_window makeKeyAndOrderFront:nil];
     }
+  }
+}
+
+bool HandleBrowserCommand(int command_id) {
+  if (!g_mori_browser) {
+    return false;  // UI not up — let Chrome's default command run
+  }
+  switch (command_id) {
+    case IDC_NEW_TAB:              [MoriRoot newTab];           return true;
+    case IDC_NEW_WINDOW:           [MoriRoot newWindow];        return true;
+    case IDC_NEW_INCOGNITO_WINDOW: [MoriRoot newPrivateWindow]; return true;
+    case IDC_RESTORE_TAB:          [MoriRoot reopenClosedTab];  return true;
+    case IDC_FOCUS_LOCATION:       [MoriRoot focusOmnibox];     return true;
+    case IDC_CLOSE_TAB:            [MoriRoot closeCurrentTab];  return true;
+    default:                       return false;
   }
 }
 
