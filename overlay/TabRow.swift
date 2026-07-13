@@ -94,7 +94,7 @@ struct TabRow: View {
         // smaller pad here lands the glyph the same ~9pt from the card edge as
         // the favicon sits from the leading edge.
         .padding(.trailing, 6)
-        .frame(height: 34)
+        .frame(height: 38)
         .background(
             RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
                 .fill(backgroundFill)

@@ -90,33 +90,36 @@ extension ThemePalette {
 
     /// Light theme — `:root` block.
     static let light = ThemePalette(
-        background: .hex("#f7f7f7"),
-        foreground: .oklch(0.165, 0.018, 248.5103),
-        card: .oklch(0.985, 0.0015, 220),
-        cardForeground: .oklch(0.165, 0.018, 248.5103),
-        popover: .oklch(0.998, 0.0008, 240),
-        popoverForeground: .oklch(0.165, 0.018, 248.5103),
-        primary: .oklch(0.645, 0.11, 241.2),
-        primaryForeground: .oklch(1, 0, 0),
-        secondary: .oklch(0.165, 0.018, 248.5103),
-        secondaryForeground: .oklch(1, 0, 0),
-        muted: .oklch(0.935, 0.002, 245),
-        mutedForeground: .oklch(0.48, 0.012, 248.5103),
-        accent: .hex("#ededed"),
-        accentForeground: .oklch(0.645, 0.11, 241.2),
+        // Dia-inspired warm neutrals: the chrome recedes into a warm off-white
+        // ground; the web card is bright white so the page is the brightest
+        // thing on screen. Accent unified to a single refined blue (#3E6AE1).
+        background: .hex("#F2EFE9"),
+        foreground: .hex("#21201C"),
+        card: .hex("#FFFFFF"),
+        cardForeground: .hex("#21201C"),
+        popover: .hex("#FCFAF6"),
+        popoverForeground: .hex("#21201C"),
+        primary: .hex("#3E6AE1"),
+        primaryForeground: .hex("#FFFFFF"),
+        secondary: .hex("#21201C"),
+        secondaryForeground: .hex("#FFFFFF"),
+        muted: .hex("#EDE8E0"),
+        mutedForeground: .hex("#78736B"),
+        accent: .hex("#ECE7DE"),
+        accentForeground: .hex("#3E6AE1"),
         destructive: .oklch(0.635, 0.24, 28),
-        destructiveForeground: .hex("#ededed"),
-        border: .oklch(0.92, 0, 0),
-        input: .hex("#ededed"),
-        ring: .oklch(0.55, 0, 0),
-        sidebar: .hex("#ebebeb"),
-        sidebarForeground: .oklch(0.165, 0.018, 248.5103),
-        sidebarPrimary: .oklch(0.645, 0.11, 241.2),
-        sidebarPrimaryForeground: .oklch(1, 0, 0),
-        sidebarAccent: .hex("#ffffff"),
-        sidebarAccentForeground: .oklch(0.165, 0.018, 248.5103),
-        sidebarBorder: .oklch(0.915, 0, 0),
-        sidebarRing: .oklch(0.55, 0, 0),
+        destructiveForeground: .hex("#FFFFFF"),
+        border: .hex("#E6E1D8"),
+        input: .hex("#ECE7DE"),
+        ring: .hex("#3E6AE1"),
+        sidebar: .hex("#EDE9E1"),
+        sidebarForeground: .hex("#21201C"),
+        sidebarPrimary: .hex("#3E6AE1"),
+        sidebarPrimaryForeground: .hex("#FFFFFF"),
+        sidebarAccent: .hex("#FFFFFF"),
+        sidebarAccentForeground: .hex("#21201C"),
+        sidebarBorder: .hex("#E1DBD0"),
+        sidebarRing: .hex("#3E6AE1"),
         statusInfoFg: .oklch(0.5, 0.134, 242.749),
         statusSuccessFg: .oklch(0.527, 0.154, 150.069),
         statusWarningFg: .oklch(0.555, 0.163, 48.998)
@@ -124,33 +127,35 @@ extension ThemePalette {
 
     /// Dark theme — `.dark` block. Neutral chrome is chroma-0 by rule.
     static let dark = ThemePalette(
-        background: .hex("#222222"),
-        foreground: .hex("#E8EAED"),
-        card: .oklch(0.36, 0, 0),
-        cardForeground: .hex("#E8EAED"),
-        popover: .oklch(0.3, 0, 0),
-        popoverForeground: .hex("#E8EAED"),
-        primary: .oklch(0.62, 0.13, 241.5),
-        primaryForeground: .oklch(0.28, 0.008, 235),
-        secondary: .hex("#E8EAED"),
-        secondaryForeground: .oklch(0.3, 0, 0),
-        muted: .oklch(0.36, 0, 0),
-        mutedForeground: .hex("#AEB6BF"),
-        accent: .oklch(0.42, 0, 0),
-        accentForeground: .oklch(0.62, 0.13, 241.5),
+        // Warm charcoal (not pure grey) so dark mode feels the same family as
+        // the warm light ground; accent unified to #5B82F0.
+        background: .hex("#1A1917"),
+        foreground: .hex("#ECE9E2"),
+        card: .hex("#232120"),
+        cardForeground: .hex("#ECE9E2"),
+        popover: .hex("#211F1D"),
+        popoverForeground: .hex("#ECE9E2"),
+        primary: .hex("#5B82F0"),
+        primaryForeground: .hex("#F5F7FF"),
+        secondary: .hex("#ECE9E2"),
+        secondaryForeground: .hex("#232120"),
+        muted: .hex("#232120"),
+        mutedForeground: .hex("#A8A29A"),
+        accent: .hex("#2A2825"),
+        accentForeground: .hex("#5B82F0"),
         destructive: .oklch(0.62, 0.22, 27),
         destructiveForeground: .oklch(1, 0, 0),
-        border: .oklch(0.45, 0, 0),
-        input: .oklch(0.4, 0.02, 240),
-        ring: .oklch(0.6, 0, 0),
-        sidebar: .hex("#151515"),
-        sidebarForeground: .hex("#F1F3F5"),
-        sidebarPrimary: .oklch(0.6, 0.12, 241),
-        sidebarPrimaryForeground: .oklch(0.28, 0.008, 235),
-        sidebarAccent: .hex("#2a2a2a"),
-        sidebarAccentForeground: .oklch(0.62, 0.13, 241.5),
-        sidebarBorder: .oklch(0.48, 0, 0),
-        sidebarRing: .oklch(0.6, 0, 0),
+        border: .hex("#34312B"),
+        input: .hex("#302D28"),
+        ring: .hex("#5B82F0"),
+        sidebar: .hex("#141311"),
+        sidebarForeground: .hex("#F1EFEA"),
+        sidebarPrimary: .hex("#5B82F0"),
+        sidebarPrimaryForeground: .hex("#F5F7FF"),
+        sidebarAccent: .hex("#2A2825"),
+        sidebarAccentForeground: .hex("#5B82F0"),
+        sidebarBorder: .hex("#3A362F"),
+        sidebarRing: .hex("#5B82F0"),
         statusInfoFg: .oklch(0.746, 0.16, 232.661),
         statusSuccessFg: .oklch(0.792, 0.209, 151.711),
         statusWarningFg: .oklch(0.828, 0.189, 84.429)
@@ -222,9 +227,9 @@ enum Radius {
     static let md: CGFloat = 4.4   // calc(radius - 2px)
     static let lg: CGFloat = 6.4   // radius
     static let xl: CGFloat = 10.4  // calc(radius + 4px)
-    static let button: CGFloat = 10
-    static let popover: CGFloat = 12 // tailwind rounded-xl
-    static let window: CGFloat = 10  // the floating web-content card (Arc-style)
+    static let button: CGFloat = 11  // omnibox, icon buttons, pills (softer)
+    static let popover: CGFloat = 16 // menus, command bar, dialogs (softer)
+    static let window: CGFloat = 14  // the floating web-content card (Arc/Dia-style)
 }
 
 /// Spacing scale for padding/gaps. A small 4px-based ramp so container insets
@@ -279,7 +284,7 @@ enum Typography {
 /// it is transparent (tiles carry a faint fill); hover is a quiet black/white
 /// overlay; a press shrinks the item to 98.5%.
 enum TabSurface {
-    static let radius: CGFloat = 10
+    static let radius: CGFloat = 11
     static let pressScale: CGFloat = 0.985
     /// Faint resting fill for pinned/icon tiles.
     static func tileRestFill(_ s: ColorScheme) -> Color {
@@ -433,8 +438,9 @@ struct Shadow {
         .black.opacity(s == .dark ? darkAlpha : lightAlpha)
     }
 
-    /// The floating web-content card (Arc-style) — a quiet lift.
-    static let card = Shadow(lightAlpha: 0.12, darkAlpha: 0.40, radius: 8, y: 2)
+    /// The floating web-content card (Arc/Dia-style) — a soft, floaty lift
+    /// (lower alpha, larger blur so it reads as gentle depth, not a hard edge).
+    static let card = Shadow(lightAlpha: 0.10, darkAlpha: 0.44, radius: 16, y: 5)
     /// Menus, popovers, toasts, the find bar — small floating chrome.
     static let popover = Shadow(lightAlpha: 0.18, darkAlpha: 0.50, radius: 14, y: 5)
     /// Peek cards and other large hovering surfaces.

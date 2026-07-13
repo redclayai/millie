@@ -126,7 +126,7 @@ struct Omnibox: View {
             }
         }
         .padding(.horizontal, 11)
-        .frame(height: 30)
+        .frame(height: 36)
         .background {
             Color.clear.liquidGlass(cornerRadius: Radius.button)
         }

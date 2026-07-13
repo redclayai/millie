@@ -526,7 +526,7 @@ private struct TabSwitcherOverlay: View {
     @Environment(\.palette) private var p
     @Environment(\.colorScheme) private var scheme
 
-    private static let accent = Color(.sRGB, red: 0.24, green: 0.37, blue: 0.99, opacity: 1)
+    private static let accent = Color(.sRGB, red: 0.243, green: 0.416, blue: 0.882, opacity: 1)
 
     var body: some View {
         if store.switcherVisible, store.switcherTabIDs.count > 1 {
