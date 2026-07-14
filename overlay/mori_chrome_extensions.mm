@@ -37,6 +37,7 @@
 #include "chrome/browser/ui/toolbar/toolbar_actions_model.h"
 #include "chrome/common/extensions/api/side_panel.h"
 #include "chrome/common/extensions/api/tabs.h"
+#include "components/prefs/pref_service.h"
 #include "components/sessions/content/session_tab_helper.h"
 #include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/render_frame_host.h"
@@ -630,6 +631,20 @@ NSString* InstallTypeString(const extensions::Extension& extension) {
 
 + (void)setActiveProfileKey:(NSString*)key {
   mori::SetActiveProfileKey(base::SysNSStringToUTF8(key ?: @"default"));
+}
+
++ (BOOL)developerMode {
+  Profile* profile = MoriProfile();
+  // Literal pref key (extensions.ui.developer_mode) to stay robust across
+  // Chromium versions without depending on the pref_names symbol.
+  return profile ? profile->GetPrefs()->GetBoolean("extensions.ui.developer_mode")
+                 : NO;
+}
+
++ (void)setDeveloperMode:(BOOL)enabled {
+  if (Profile* profile = MoriProfile()) {
+    profile->GetPrefs()->SetBoolean("extensions.ui.developer_mode", enabled);
+  }
 }
 
 + (NSArray<NSDictionary*>*)installedExtensions {

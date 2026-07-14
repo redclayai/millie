@@ -85,6 +85,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Open chrome://extensions focused on one extension's details.
 + (void)openExtensionsPageForId:(NSString*)extensionId NS_SWIFT_NAME(openExtensionsPage(id:));
 
+/// Chromium's per-profile "Developer mode" toggle (the
+/// extensions.ui.developer_mode pref) — surfaced in Millie's extensions panel.
++ (BOOL)developerMode NS_SWIFT_NAME(developerMode());
++ (void)setDeveloperMode:(BOOL)enabled NS_SWIFT_NAME(setDeveloperMode(_:));
+
 /// Install a packed .crx through Chrome's CrxInstaller. Asynchronous; posts
 /// MoriChromeExtensionInstallFinished and MoriChromeExtensionsChanged when
 /// done. Returns NO only if the extension service isn't ready.
