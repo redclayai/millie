@@ -143,143 +143,240 @@ struct ExtensionIconView: View {
     }
 }
 
-/// The popover listing every installed extension with run/pin controls and a
-/// context menu mirroring Chrome's toolbar menu (options, details, manage,
-/// enable/disable, remove).
+/// The extensions/site control panel opened from the omnibox puzzle button.
+/// Three sections mirroring Arc's site menu: an icon grid of installed
+/// extensions (+ Add), Settings toggles (extension developer mode, automatic
+/// PiP), and a "Secure" site footer whose ··· menu carries per-site/data and
+/// boost/extension actions.
 struct ExtensionsMenu: View {
     @ObservedObject var store: BrowserStore
     let dismiss: () -> Void
 
     @ObservedObject private var extensions = ExtensionStore.shared
+    @ObservedObject private var settings = BrowserSettings.shared
     @Environment(\.palette) private var p
+
+    @State private var devMode = false
+    @State private var siteBlocked = false
+
+    // The active page as a web URL (nil on chrome:// / start pages).
+    private var siteURL: String? {
+        guard let u = store.selectedTab?.urlString, u.hasPrefix("http") else { return nil }
+        return u
+    }
+    private var siteHost: String? { siteURL.flatMap { SiteBrand.host(from: $0) } }
+    private var isSecure: Bool { store.selectedTab?.urlString.hasPrefix("https://") ?? false }
+
+    private let gridColumns = Array(
+        repeating: GridItem(.fixed(46), spacing: 4, alignment: .center), count: 5)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Extensions")
-                .font(Typography.ui(Typography.base, weight: .semibold))
-                .foregroundStyle(p.foreground.color)
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 10)
+            sectionHeader("Extensions")
+            extensionGrid
 
             Hairline().opacity(0.6)
 
-            if extensions.extensions.isEmpty {
-                Text("No extensions installed.")
-                    .font(Typography.ui(Typography.base))
-                    .foregroundStyle(p.mutedForeground.color)
-                    .padding(14)
-            } else {
-                ScrollView {
-                    VStack(spacing: 1) {
-                        ForEach(extensions.extensions) { ext in
-                            ExtensionMenuRow(
-                                ext: ext,
-                                onActivate: { anchor in
-                                    dismiss()
-                                    extensions.runAction(ext, anchor: anchor)
-                                },
-                                onTogglePin: { extensions.togglePinned(ext) },
-                                dismiss: dismiss
-                            )
-                        }
-                    }
-                    .padding(5)
-                }
-                .frame(maxHeight: 320)
-            }
+            sectionHeader("Settings")
+            settingsSection
 
-            // Per-site control: block all extensions on the active page — the
-            // fix for sites that break when content scripts inject (e.g.
-            // Netflix's M7111 with Grammarly/1Password).
-            if let url = store.selectedTab?.urlString,
-               url.hasPrefix("http"), let host = SiteBrand.host(from: url) {
-                Hairline().opacity(0.6)
-                SiteBlockToggle(store: store, url: url, host: host)
-                    .id(host)
-            }
-
-            Hairline().opacity(0.6)
-
-            Button {
-                extensions.openManagePage()
-                dismiss()
-            } label: {
-                HStack(spacing: 7) {
-                    Icon(name: "gearshape", size: 14, weight: .regular)
-                    Text("Manage Extensions…")
-                        .font(Typography.ui(Typography.base))
-                    Spacer()
-                }
-                .foregroundStyle(p.foreground.color)
-                .padding(.horizontal, 14)
-                .frame(height: 38)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            secureFooter
         }
         .frame(width: 300)
         .background(p.popover.color)
-        .onAppear { extensions.refresh() }
+        .onAppear {
+            extensions.refresh()
+            devMode = MoriChromeExtensions.developerMode()
+            if let s = siteURL { siteBlocked = extensions.areExtensionsBlocked(onSite: s) }
+        }
     }
-}
 
-/// Per-site "block all extensions here" toggle for the active page. Blocking a
-/// site stops every extension's content scripts from running there (Chrome's
-/// `kBlockAllExtensions`), which fixes sites that misbehave with injected
-/// extensions — e.g. Netflix throwing M7111 when Grammarly/1Password inject
-/// into its player. Reloads the tab so the change takes effect immediately.
-private struct SiteBlockToggle: View {
-    @ObservedObject var store: BrowserStore
-    let url: String
-    let host: String
+    // MARK: - Extensions grid
 
-    @ObservedObject private var extensions = ExtensionStore.shared
-    @Environment(\.palette) private var p
-    @State private var blocked = false
-    @State private var hover = false
+    @ViewBuilder private var extensionGrid: some View {
+        if extensions.extensions.isEmpty {
+            HStack {
+                Text("No extensions installed.")
+                    .font(Typography.ui(Typography.base))
+                    .foregroundStyle(p.mutedForeground.color)
+                Spacer()
+                addButton
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        } else {
+            ScrollView {
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 4) {
+                    ForEach(extensions.extensions) { ext in
+                        GridExtCell(
+                            ext: ext,
+                            onActivate: { anchor in dismiss(); extensions.runAction(ext, anchor: anchor) },
+                            onTogglePin: { extensions.togglePinned(ext) },
+                            dismiss: dismiss)
+                    }
+                    addButton
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+            .frame(maxHeight: 168)
+        }
+    }
 
-    var body: some View {
-        Button {
-            blocked.toggle()
-            extensions.setExtensionsBlocked(blocked, onSite: url)
-            store.reload()
-        } label: {
-            HStack(spacing: 9) {
-                Icon(name: blocked ? "puzzlepiece.extension.fill" : "puzzlepiece.extension",
-                     size: 14, weight: .regular)
-                    .foregroundStyle(blocked ? p.primary.color : p.mutedForeground.color)
+    private var addButton: some View {
+        Button { extensions.presentImportPanel(); dismiss() } label: {
+            RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                .strokeBorder(p.border.color, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                .frame(width: 34, height: 34)
+                .overlay(Icon(name: "plus", size: 13, weight: .medium)
+                    .foregroundStyle(p.mutedForeground.color))
+                .frame(width: 46, height: 46)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Add an extension")
+    }
+
+    // MARK: - Settings
+
+    @ViewBuilder private var settingsSection: some View {
+        settingRow(icon: "chevron.left.forwardslash.chevron.right",
+                   title: "Developer Mode",
+                   value: devMode ? "On" : "Off",
+                   on: devMode) {
+            devMode.toggle()
+            MoriChromeExtensions.setDeveloperMode(devMode)
+        }
+        settingRow(icon: "pip",
+                   title: "Automatic Picture-in-Picture",
+                   value: settings.autoPiP ? "Allowed" : "Off",
+                   on: settings.autoPiP) {
+            settings.autoPiP.toggle()
+        }
+    }
+
+    private func settingRow(icon: String, title: String, value: String,
+                            on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                    .fill(on ? p.primary.color.opacity(0.14) : p.input.color.opacity(0.5))
+                    .frame(width: 28, height: 28)
+                    .overlay(Icon(name: icon, size: 13, weight: .regular)
+                        .foregroundStyle(on ? p.primary.color : p.mutedForeground.color))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Block extensions on this site")
-                        .font(Typography.ui(Typography.base))
+                    Text(title)
+                        .font(Typography.ui(Typography.base, weight: .medium))
                         .foregroundStyle(p.foreground.color)
-                    Text(host)
+                        .lineLimit(1)
+                    Text(value)
                         .font(Typography.ui(Typography.small))
                         .foregroundStyle(p.mutedForeground.color)
-                        .lineLimit(1)
                 }
                 Spacer(minLength: 6)
-                Toggle("", isOn: .constant(blocked))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
+                Toggle("", isOn: .constant(on))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.mini)
                     .allowsHitTesting(false)
             }
             .padding(.horizontal, 14)
             .frame(height: 46)
             .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
-                    .fill(hover ? p.accent.color.opacity(0.4) : .clear))
         }
         .buttonStyle(.plain)
-        .onHover { hover = $0 }
-        .help("Stops all extensions from running on \(host) — fixes sites that break with extensions (e.g. Netflix).")
-        .onAppear { blocked = extensions.areExtensionsBlocked(onSite: url) }
+    }
+
+    // MARK: - Secure footer + site menu
+
+    private var secureFooter: some View {
+        HStack(spacing: 8) {
+            Icon(name: isSecure ? "lock.fill" : "lock.open.fill", size: 12, weight: .semibold)
+                .foregroundStyle(isSecure ? p.statusSuccessFg.color : p.mutedForeground.color)
+            Text(footerLabel)
+                .font(Typography.ui(Typography.base, weight: .medium))
+                .foregroundStyle(p.foreground.color)
+            Spacer()
+            siteMenu
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .background(p.input.color.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.button, style: .continuous))
+        .padding(10)
+    }
+
+    private var footerLabel: String {
+        if siteURL != nil { return isSecure ? "Secure" : "Not Secure" }
+        return "Millie"
+    }
+
+    private var siteMenu: some View {
+        Menu {
+            Button("Clear Cache") {
+                MoriPrivacy.clearCache()
+                ToastCenter.shared.show("Cache cleared", icon: "trash", style: .success)
+                dismiss()
+            }
+            Button("Clear Cookies") {
+                MoriPrivacy.clearCookies()
+                ToastCenter.shared.show("Cookies cleared", icon: "trash", style: .success)
+                dismiss()
+            }
+            Divider()
+            Button("Manage Boosts…") { store.presentBoostEditor(); dismiss() }
+            Button("New Boost…") { store.presentBoostEditor(); dismiss() }
+            Divider()
+            Button("Manage Extensions…") { extensions.openManagePage(); dismiss() }
+            Button("Add Extension…") { extensions.presentImportPanel(); dismiss() }
+            if let s = siteURL {
+                Divider()
+                Toggle("Block extensions on this site", isOn: Binding(
+                    get: { siteBlocked },
+                    set: { v in
+                        siteBlocked = v
+                        extensions.setExtensionsBlocked(v, onSite: s)
+                        store.reload()
+                    }))
+                Button("All Site Settings…") { openSiteSettings(); dismiss() }
+            }
+        } label: {
+            Icon(name: "ellipsis", size: 14, weight: .semibold)
+                .foregroundStyle(p.mutedForeground.color)
+                .frame(width: 26, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Site & data")
+    }
+
+    private func openSiteSettings() {
+        if let url = siteURL, let comps = URLComponents(string: url), let host = comps.host {
+            let scheme = comps.scheme ?? "https"
+            _ = store.newTab(url: "chrome://settings/content/siteDetails?site=\(scheme)://\(host)")
+        } else {
+            _ = store.newTab(url: "chrome://settings/content")
+        }
+    }
+
+    // MARK: - Shared
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(Typography.ui(Typography.small, weight: .semibold))
+            .foregroundStyle(p.mutedForeground.color)
+            .textCase(.uppercase)
+            .kerning(0.4)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
     }
 }
 
-private struct ExtensionMenuRow: View {
+/// One extension in the panel's icon grid: click runs its action, the pin star
+/// marks toolbar-pinned ones, and the context menu carries the full Chrome
+/// per-extension controls (pin, options, details, enable/disable, remove).
+private struct GridExtCell: View {
     let ext: ChromeExtensionInfo
     let onActivate: (NSRect) -> Void
     let onTogglePin: () -> Void
@@ -291,78 +388,53 @@ private struct ExtensionMenuRow: View {
     private let anchor = AnchorBox()
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                onActivate(anchor.screenRect)
-            } label: {
-                HStack(spacing: 10) {
-                    ExtensionIconView(ext: ext, size: 22)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(ext.name)
-                            .font(Typography.ui(Typography.base, weight: .medium))
-                            .foregroundStyle(p.foreground.color)
-                            .lineLimit(1)
-                        if !ext.enabled {
-                            Text("Disabled")
-                                .font(Typography.ui(Typography.small))
-                                .foregroundStyle(p.mutedForeground.color)
-                        }
-                    }
-                    Spacer(minLength: 4)
-                    if !ext.badgeText.isEmpty {
-                        Text(String(ext.badgeText.prefix(4)))
-                            .font(Typography.ui(8, weight: .bold))
-                            .foregroundStyle(ext.badgeTextColor.color)
-                            .padding(.horizontal, 4)
-                            .frame(minHeight: 12)
-                            .background(Capsule().fill(ext.badgeBackgroundColor.color))
+        Button { onActivate(anchor.screenRect) } label: {
+            ExtensionIconView(ext: ext, size: 28)
+                .overlay(alignment: .bottomTrailing) {
+                    if ext.pinned {
+                        Icon(name: "star.fill", size: 8)
+                            .foregroundStyle(p.primary.color)
+                            .padding(2)
+                            .background(Circle().fill(p.popover.color))
+                            .offset(x: 3, y: 3)
                     }
                 }
+                .overlay(alignment: .topTrailing) {
+                    if !ext.badgeText.isEmpty {
+                        Text(String(ext.badgeText.prefix(3)))
+                            .font(Typography.ui(7, weight: .bold))
+                            .foregroundStyle(ext.badgeTextColor.color)
+                            .padding(.horizontal, 2)
+                            .frame(minWidth: 10, minHeight: 9)
+                            .background(Capsule().fill(ext.badgeBackgroundColor.color))
+                            .offset(x: 4, y: -3)
+                    }
+                }
+                .frame(width: 46, height: 46)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                        .fill(hover ? p.accent.color.opacity(0.5) : .clear))
                 .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!ext.enabled)
-            .help(ext.enabled ? "Run \(ext.name)" : "\(ext.name) is disabled")
-
-            Button(action: onTogglePin) {
-                Icon(name: ext.pinned ? "pin.fill" : "pin", size: 14)
-                    .foregroundStyle(ext.pinned ? p.primary.color : p.mutedForeground.color)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!ext.enabled)
-            .help(ext.pinned ? "Unpin from toolbar" : "Pin to toolbar")
         }
-        .padding(.horizontal, 8)
-        .frame(height: 42)
-        .background(
-            RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
-                .fill(hover ? p.accent.color.opacity(0.5) : .clear)
-        )
+        .buttonStyle(.plain)
+        .disabled(!ext.enabled)
         .background(AnchorReader(box: anchor))
         .onHover { hover = $0 }
         .animation(Motion.snappy, value: hover)
+        .help(ext.enabled ? ext.name : "\(ext.name) (disabled)")
         .contextMenu {
+            Button(ext.pinned ? "Unpin from toolbar" : "Pin to toolbar", action: onTogglePin)
+                .disabled(!ext.enabled)
             if ext.hasOptionsPage {
-                Button("Options…") {
-                    extensions.openOptions(ext)
-                    dismiss()
-                }
+                Button("Options…") { extensions.openOptions(ext); dismiss() }
             }
-            Button("Details") {
-                extensions.openDetailsPage(ext)
-                dismiss()
-            }
+            Button("Details") { extensions.openDetailsPage(ext); dismiss() }
             Divider()
             if ext.mayDisable {
                 Button(ext.enabled ? "Disable" : "Enable") {
                     extensions.setEnabled(ext, !ext.enabled)
                 }
-                Button("Remove from Millie…") {
-                    dismiss()
-                    extensions.remove(ext)
-                }
+                Button("Remove from Millie…") { dismiss(); extensions.remove(ext) }
             }
         }
     }
