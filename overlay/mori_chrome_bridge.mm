@@ -5,6 +5,7 @@
 
 #import "chrome/browser/ui/mori/MoriBrowserView.h"
 #import "chrome/browser/ui/mori/MoriPrivacy.h"
+#include "chrome/browser/ui/mori/mori_adblock.h"
 #include "chrome/browser/ui/mori/mori_chrome_hooks.h"
 
 #include <algorithm>
@@ -2097,6 +2098,7 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
 }
 
 + (void)setAdBlockerEnabled:(BOOL)enabled {
+  mori::SetAdBlockEnabled(enabled);
 }
 
 + (BOOL)cancelDownloadWithID:(uint32_t)downloadID {

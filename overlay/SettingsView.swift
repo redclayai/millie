@@ -9,6 +9,7 @@ struct SettingsView: View {
     @ObservedObject private var settings = BrowserSettings.shared
     @ObservedObject private var extensions = ExtensionStore.shared
     @ObservedObject private var sync = MillieSync.shared
+    @ObservedObject private var adBlock = AdBlockStore.shared
     @Environment(\.palette) private var p
 
     @State private var syncEmail = ""
@@ -186,6 +187,11 @@ struct SettingsView: View {
                     Text("Use Millie's bundled Block List Project ads list.")
                         .font(Typography.ui(Typography.label))
                         .foregroundStyle(p.mutedForeground.color)
+                    if settings.blockAds && adBlock.blockedThisSession > 0 {
+                        Text("\(adBlock.blockedThisSession) requests blocked this session.")
+                            .font(Typography.ui(Typography.label))
+                            .foregroundStyle(p.mutedForeground.color)
+                    }
                 }
             }
 
