@@ -878,6 +878,9 @@ final class BrowserStore: ObservableObject {
         _ = newTab(url: session.url, select: true)
     }
 
+    /// Whether there's a recently-closed tab to reopen (gates the menu item).
+    var canReopenClosedTab: Bool { !closedTabSessions.isEmpty }
+
     /// Select the tab at a 1-based slot (Cmd-1…Cmd-9). By convention the
     /// highest slot, 9, always jumps to the *last* tab regardless of count.
     ///
