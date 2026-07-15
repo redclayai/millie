@@ -189,6 +189,10 @@ private struct SidebarContextMenu: View {
         Button("New Tab") {
             store.newTab()
         }
+        Button("Reopen Closed Tab") {
+            store.reopenClosedTab()
+        }
+        .disabled(!store.canReopenClosedTab)
         Button("Add New Folder") {
             store.addFolderForEditing()
         }
