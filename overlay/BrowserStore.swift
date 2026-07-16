@@ -150,6 +150,9 @@ final class BrowserStore: ObservableObject {
         var faviconURL: String?
         /// Canonical/original URL for a foldered tab (folder-icon reset target).
         var folderHomeURL: String? = nil
+        /// User opted this tab out of sleeping/archiving ("Keep Awake").
+        /// Optional so sessions saved before this field still decode.
+        var keepAwake: Bool? = nil
     }
 
     private struct PersistedSession: Codable {
@@ -191,23 +194,31 @@ final class BrowserStore: ObservableObject {
         }
         ensureContextIntegrity()
         syncChromePinnedStates()
-        // The active context's theme drives the chrome while it's active. On a
-        // fresh (v1) profile the migration seeds it from the global theme, so
-        // this is a no-op there.
-        settings.gradientTheme = activeContext.theme
+        // Themes moved from Space → Profile. Migrate: seed each unthemed Profile
+        // from the first Space using it that carries a (legacy per-Space) theme,
+        // so existing users keep their washes.
+        for pi in profiles.indices where profiles[pi].theme.isEmpty {
+            if let ctx = contexts.first(where: {
+                ($0.profileID ?? BrowserProfile.defaultID) == profiles[pi].id && !$0.theme.isEmpty
+            }) {
+                profiles[pi].theme = ctx.theme
+            }
+        }
+        // The active Profile's theme drives the chrome while it's active.
+        settings.gradientTheme = themeForContext(activeContext)
         isRestoringSession = false
 
         // Theme edits made anywhere (sidebar popover, Settings) write
-        // `settings.gradientTheme`; fold them back into the active context so
-        // each context keeps its own wash, Arc-style.
+        // `settings.gradientTheme`; fold them back into the active Space's
+        // Profile so every Space on that Profile shares the wash.
         themeMirror = settings.$gradientTheme
             .dropFirst()
             .sink { [weak self] theme in
                 guard let self, !self.isRestoringSession else { return }
                 guard self.contexts.indices.contains(self.activeContextIndex) else { return }
-                guard self.contexts[self.activeContextIndex].theme != theme else { return }
-                self.contexts[self.activeContextIndex].theme = theme
-                self.scheduleSessionSave()
+                let pid = self.contexts[self.activeContextIndex].profileID ?? BrowserProfile.defaultID
+                guard self.profileTheme(pid) != theme else { return }
+                self.applyThemeToProfile(pid, theme)
             }
         aiIntegrationMirror = settings.$aiIntegrationEnabled
             .dropFirst()
@@ -312,6 +323,7 @@ final class BrowserStore: ObservableObject {
                 tab.faviconURL = persisted.faviconURL
                 tab.folderHomeURL = persisted.folderHomeURL
                 tab.customTitle = persisted.customTitle
+                tab.keepAwake = persisted.keepAwake ?? false
                 return tab
             }
         guard !restoredTabs.isEmpty else { return false }
@@ -431,7 +443,7 @@ final class BrowserStore: ObservableObject {
             snapshot[idx].selectedTabID = selectedTabID
         }
         let state = PersistedSession(
-            tabs: tabs.filter { !privateTabIDs.contains($0.id) }.map { PersistedTab(id: $0.id, url: $0.urlString, title: $0.title, customTitle: $0.customTitle, profileKey: $0.profileKey, faviconURL: $0.faviconURL, folderHomeURL: $0.folderHomeURL) },
+            tabs: tabs.filter { !privateTabIDs.contains($0.id) }.map { PersistedTab(id: $0.id, url: $0.urlString, title: $0.title, customTitle: $0.customTitle, profileKey: $0.profileKey, faviconURL: $0.faviconURL, folderHomeURL: $0.folderHomeURL, keepAwake: $0.keepAwake ? true : nil) },
             selectedTabID: selectedTabID,
             profiles: profiles,
             contexts: snapshot,
@@ -550,6 +562,25 @@ final class BrowserStore: ObservableObject {
 
     func closeSplit() {
         splitTabID = nil
+    }
+
+    /// Swap which pane each tab occupies (the split ratio — left-pane width —
+    /// stays put; only the tabs trade sides).
+    func swapSplitSides() {
+        guard splitTabID != nil else { return }
+        splitSide = splitSide == .left ? .right : .left
+    }
+
+    /// Split two specific tabs — used when one sidebar tab is dropped onto
+    /// another. The drop target becomes the front (primary) pane; the dragged
+    /// tab fills the other side.
+    func splitTabs(_ dragged: BrowserTab.ID, with target: BrowserTab.ID,
+                   side: SplitSide = .right) {
+        guard dragged != target,
+              tabs.contains(where: { $0.id == dragged }),
+              tabs.contains(where: { $0.id == target }) else { return }
+        selectTab(target)
+        splitWith(dragged, side: side)
     }
 
     func selectTab(_ id: BrowserTab.ID) {
@@ -1518,10 +1549,9 @@ final class BrowserStore: ObservableObject {
               let targetIndex = contexts.firstIndex(where: { $0.id == id })
         else { return }
 
-        // Stash the outgoing context's state.
+        // Stash the outgoing context's selection.
         if contexts.indices.contains(activeContextIndex) {
             contexts[activeContextIndex].selectedTabID = selectedTabID
-            contexts[activeContextIndex].theme = settings.gradientTheme
         }
 
         // Slide direction: later Space → content slides in from the right.
@@ -1530,7 +1560,7 @@ final class BrowserStore: ObservableObject {
         withAnimation(.spring(response: 0.55, dampingFraction: 0.58)) {
             activeContextID = id
         }
-        settings.gradientTheme = contexts[targetIndex].theme
+        settings.gradientTheme = themeForContext(contexts[targetIndex])
 
         if selectRemembered {
             let context = contexts[targetIndex]
@@ -1846,10 +1876,41 @@ final class BrowserStore: ObservableObject {
     }
 
     func setContextTheme(_ id: BrowserContext.ID, theme: GradientTheme) {
-        guard let idx = contexts.firstIndex(where: { $0.id == id }) else { return }
-        contexts[idx].theme = theme
-        if id == activeContextID {
+        // Themes live on the Profile now; editing a Space edits its Profile's
+        // theme (shared by every Space on that Profile).
+        guard let ctx = contexts.first(where: { $0.id == id }) else { return }
+        setProfileTheme(ctx.profileID ?? BrowserProfile.defaultID, theme: theme)
+    }
+
+    // MARK: Per-Profile theming
+
+    /// The gradient theme in effect for a Space — its Profile's theme.
+    func themeForContext(_ ctx: BrowserContext) -> GradientTheme {
+        profileTheme(ctx.profileID ?? BrowserProfile.defaultID)
+    }
+
+    /// A Profile's theme (`.none` if the Profile is unknown/unthemed).
+    func profileTheme(_ profileID: BrowserProfile.ID) -> GradientTheme {
+        profiles.first { $0.id == profileID }?.theme ?? .none
+    }
+
+    /// Set a Profile's theme: update the Profile, mirror it onto every Space
+    /// using that Profile (keeps `context.theme` a live cache for the switch/
+    /// mirror machinery), and apply it live if that Profile is active.
+    func setProfileTheme(_ profileID: BrowserProfile.ID, theme: GradientTheme) {
+        applyThemeToProfile(profileID, theme)
+        if (activeContext.profileID ?? BrowserProfile.defaultID) == profileID {
             settings.gradientTheme = theme
+        }
+    }
+
+    private func applyThemeToProfile(_ profileID: BrowserProfile.ID, _ theme: GradientTheme) {
+        if let pi = profiles.firstIndex(where: { $0.id == profileID }) {
+            profiles[pi].theme = theme
+        }
+        for i in contexts.indices
+        where (contexts[i].profileID ?? BrowserProfile.defaultID) == profileID {
+            contexts[i].theme = theme
         }
         scheduleSessionSave()
     }

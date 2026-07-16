@@ -90,6 +90,10 @@ struct BrowserProfile: Identifiable, Equatable, Codable {
     var name: String
     /// Glyph asset for the Profile (see GlyphLibrary).
     var symbol: String
+    /// The gradient chrome theme for this Profile. Every Space using this
+    /// Profile inherits it. `.none` = no custom wash. Optional-decoded so
+    /// sessions saved before per-Profile themes still load.
+    var theme: GradientTheme = .none
 
     /// Stable id of the built-in Default profile, which maps to the primary
     /// Chromium profile (engine key "default").
@@ -104,9 +108,22 @@ struct BrowserProfile: Identifiable, Equatable, Codable {
     static let `default` = BrowserProfile(id: defaultID, name: "Default",
                                           symbol: "glyph-circle")
 
-    init(id: UUID = UUID(), name: String, symbol: String = "glyph-circle") {
+    init(id: UUID = UUID(), name: String, symbol: String = "glyph-circle",
+         theme: GradientTheme = .none) {
         self.id = id
         self.name = name
         self.symbol = symbol
+        self.theme = theme
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, symbol, theme }
+
+    // Custom decode so profiles saved before `theme` existed still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        symbol = try c.decodeIfPresent(String.self, forKey: .symbol) ?? "glyph-circle"
+        theme = try c.decodeIfPresent(GradientTheme.self, forKey: .theme) ?? .none
     }
 }

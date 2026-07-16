@@ -201,8 +201,14 @@ private struct ContextEditor: View {
                     .font(Typography.ui(Typography.label, weight: .medium))
                     .foregroundStyle(p.mutedForeground.color)
                 CompactThemeStrip(
-                    selected: context.theme,
+                    selected: store.themeForContext(context),
                     onPick: { store.setContextTheme(contextID, theme: $0) })
+                GradientWorkshop(theme: Binding(
+                    get: { store.themeForContext(context) },
+                    set: { store.setContextTheme(contextID, theme: $0) }))
+                Text("Applies to every Space using the \(store.profile(for: context).name) profile.")
+                    .font(Typography.ui(Typography.label))
+                    .foregroundStyle(p.mutedForeground.color)
 
                 Divider()
 

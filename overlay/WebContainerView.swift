@@ -59,6 +59,9 @@ struct WebContainerView: NSViewRepresentable {
             let right = store.splitSide == .left ? primary.browserView
                                                  : splitTab.browserView
             nsView.splitLayout = (left: left, right: right)
+            // `splitRatio` is the left pane's screen fraction, so it maps to the
+            // divider position directly regardless of which tab is on the left.
+            nsView.splitRatio = CGFloat(BrowserSettings.shared.splitRatio)
         }
 
         // Add, position, and set visibility for current tabs.
@@ -128,17 +131,24 @@ struct WebContainerView: NSViewRepresentable {
             didSet { needsLayout = true }
         }
 
+        /// Left pane's fraction of the width (0.2…0.8) while a split is active.
+        var splitRatio: CGFloat = 0.5 {
+            didSet { needsLayout = true }
+        }
+
         static let splitGap: CGFloat = 8
 
         func frameForSubview(_ view: NSView) -> NSRect {
             guard let split = splitLayout else { return bounds }
-            let half = (bounds.width - Self.splitGap) / 2
+            let usable = bounds.width - Self.splitGap
+            let ratio = min(max(splitRatio, 0.2), 0.8)
+            let leftWidth = usable * ratio
             if view === split.left {
-                return NSRect(x: 0, y: 0, width: half, height: bounds.height)
+                return NSRect(x: 0, y: 0, width: leftWidth, height: bounds.height)
             }
             if view === split.right {
-                return NSRect(x: half + Self.splitGap, y: 0,
-                              width: half, height: bounds.height)
+                return NSRect(x: leftWidth + Self.splitGap, y: 0,
+                              width: usable - leftWidth, height: bounds.height)
             }
             return bounds
         }

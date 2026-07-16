@@ -231,15 +231,34 @@ struct RootView: View {
         }
         .overlay(alignment: store.splitSide == .left ? .topLeading : .topTrailing) {
             if store.splitTabID != nil {
-                Button { store.closeSplit() } label: {
-                    Icon(name: "xmark", size: 10, weight: .bold)
-                        .foregroundStyle(palette.mutedForeground.color)
-                        .frame(width: 22, height: 22)
-                        .background(.regularMaterial, in: Circle())
+                HStack(spacing: 6) {
+                    Button { store.swapSplitSides() } label: {
+                        Icon(name: "arrow.left.arrow.right", size: 10, weight: .bold)
+                            .foregroundStyle(palette.mutedForeground.color)
+                            .frame(width: 22, height: 22)
+                            .background(.regularMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Swap sides")
+                    Button { store.closeSplit() } label: {
+                        Icon(name: "xmark", size: 10, weight: .bold)
+                            .foregroundStyle(palette.mutedForeground.color)
+                            .frame(width: 22, height: 22)
+                            .background(.regularMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close split")
                 }
-                .buttonStyle(.plain)
-                .help("Close split")
                 .padding(10)
+            }
+        }
+        // Draggable divider to resize the two panes.
+        .overlay {
+            if store.splitTabID != nil {
+                SplitDivider(
+                    ratio: Binding(get: { settings.splitRatio },
+                                   set: { settings.splitRatio = $0 }),
+                    containerWidth: webCardWidth)
             }
         }
         .background {
@@ -292,6 +311,38 @@ private struct SplitDropPreview: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A thin draggable handle on the split seam. Dragging sets the left pane's
+/// screen fraction (0.2…0.8). Only the ~16pt handle is hit-testable, so clicks
+/// elsewhere still reach the web content beneath (same trick as the close btn).
+private struct SplitDivider: View {
+    @Binding var ratio: Double
+    let containerWidth: CGFloat
+    @GestureState private var active = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = containerWidth > 1 ? containerWidth : geo.size.width
+            Capsule()
+                .fill(.white.opacity(active ? 0.95 : 0.4))
+                .frame(width: 4, height: 42)
+                .shadow(color: .black.opacity(0.25), radius: 2)
+                .frame(width: 16, height: geo.size.height)
+                .contentShape(Rectangle())
+                .position(x: w * ratio, y: geo.size.height / 2)
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .updating($active) { _, s, _ in s = true }
+                        .onChanged { v in
+                            ratio = min(max(Double(v.location.x / w), 0.2), 0.8)
+                        }
+                )
+                .onHover { hovering in
+                    if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                }
+        }
     }
 }
 

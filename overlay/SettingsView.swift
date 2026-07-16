@@ -383,6 +383,7 @@ struct SettingsView: View {
                 .foregroundStyle(p.mutedForeground.color)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(store.profiles) { profile in
+              VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     Icon(name: profile.symbol, size: 15)
                         .foregroundStyle(p.foreground.color)
@@ -428,6 +429,18 @@ struct SettingsView: View {
                     }
                 }
                 .frame(height: 30)
+
+                DisclosureGroup {
+                    GradientWorkshop(theme: Binding(
+                        get: { store.profileTheme(profile.id) },
+                        set: { store.setProfileTheme(profile.id, theme: $0) }))
+                        .padding(.top, 6)
+                } label: {
+                    Text("Theme")
+                        .font(Typography.ui(Typography.label, weight: .medium))
+                        .foregroundStyle(p.mutedForeground.color)
+                }
+              }
             }
             Button {
                 store.addProfile(name: "Profile \(store.profiles.count)")

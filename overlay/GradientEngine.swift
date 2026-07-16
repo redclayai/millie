@@ -102,7 +102,10 @@ enum GradientEngine {
         if colors.isEmpty {
             Color.clear
         } else {
-            GradientMesh(colors: colors)
+            GradientMesh(colors: colors,
+                         blend: CGFloat(theme.blend),
+                         angle: theme.angle,
+                         intensity: CGFloat(theme.intensity))
         }
     }
 
@@ -165,11 +168,23 @@ struct GradientMesh: View {
     var relativeBlur: CGFloat = 0.14
     /// Upper bound on the blur so window-scale washes don't get pathological.
     var maxBlur: CGFloat = 70
+    /// When set, `blend` (0…1) drives the blur instead of `relativeBlur`:
+    /// 0 = tight, distinct color blobs; 1 = one smooth wash.
+    var blend: CGFloat? = nil
+    /// Rotation of the whole gradient, in degrees.
+    var angle: Double = 0
+    /// Multiplies how far each color blooms — subtle (≈0.4) … vivid (≈1.6).
+    var intensity: CGFloat = 1
 
     var body: some View {
         GeometryReader { geo in
             let maxDim = max(geo.size.width, geo.size.height)
-            let reach = maxDim * 1.1
+            let reach = maxDim * 1.1 * max(0.2, intensity)
+            let blurRadius: CGFloat = {
+                guard let blend else { return min(maxDim * relativeBlur, maxBlur) }
+                let frac = 0.04 + max(0, min(1, blend)) * 0.24
+                return min(maxDim * frac, 130)
+            }()
             ZStack {
                 // Opaque base keeps edges solid so the blur can't fade them out.
                 (colors.first ?? Color.clear)
@@ -182,8 +197,10 @@ struct GradientMesh: View {
                     bloom(colors[0], at: .topLeading, reach: reach * 0.9)
                 }
             }
-            .scaleEffect(1.35)   // overscan so the blur has bleed to sample
-            .blur(radius: min(maxDim * relativeBlur, maxBlur))
+            // Rotation needs extra overscan so the corners still cover the card.
+            .scaleEffect(angle == 0 ? 1.35 : 2.0)
+            .rotationEffect(.degrees(angle))
+            .blur(radius: blurRadius)
         }
     }
 

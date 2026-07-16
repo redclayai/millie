@@ -112,6 +112,10 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     /// auto-sleep and auto-archive maintenance passes.
     @Published var lastAccessedAt: Date = Date()
 
+    /// User opted this tab out of sleeping/archiving ("Keep Awake"). Exempts it
+    /// from auto-sleep, "Sleep Background Tabs", manual sleep, and auto-archive.
+    @Published var keepAwake: Bool = false
+
     /// True while this tab is showing the distraction-free Reader view.
     @Published private(set) var readerActive: Bool = false
 

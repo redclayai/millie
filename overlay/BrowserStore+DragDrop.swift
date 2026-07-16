@@ -117,12 +117,42 @@ struct TabReorderDropDelegate: DropDelegate {
     /// the tab around while the user is only passing through them.
     var moveOnEnter = true
 
+    /// When set (per-tab rows), dropping in the row's vertical center splits the
+    /// dragged tab with THIS tab instead of reordering. The edges still reorder.
+    var splitTargetID: BrowserTab.ID? = nil
+    /// Row height, so the center "split" band can be measured from `info`.
+    var rowHeight: CGFloat = 38
+    /// Shared highlight: set to the target tab id while the cursor is in its
+    /// split band, so the row can show a "drop to split" ring.
+    var splitHover: Binding<BrowserTab.ID?>? = nil
+
+    /// Cursor is in the middle ~44% of the row → a split, not a reorder.
+    private func inSplitBand(_ info: DropInfo) -> Bool {
+        guard splitTargetID != nil else { return false }
+        let y = info.location.y
+        return y > rowHeight * 0.28 && y < rowHeight * 0.72
+    }
+
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
+        if let sid = splitTargetID, inSplitBand(info) {
+            splitHover?.wrappedValue = sid
+        } else if splitTargetID != nil {
+            if splitHover?.wrappedValue == splitTargetID { splitHover?.wrappedValue = nil }
+            // Left the center band → resume live reordering.
+            if moveOnEnter {
+                resolveDraggedTabID(from: info) { move($0, clearingDragState: false) }
+            }
+        }
+        return DropProposal(operation: .move)
     }
 
     func dropEntered(info: DropInfo) {
         isTargeted?.wrappedValue = true
+        // In the split band, don't reorder — just arm the split highlight.
+        if let sid = splitTargetID, inSplitBand(info) {
+            splitHover?.wrappedValue = sid
+            return
+        }
         guard moveOnEnter else { return }
         resolveDraggedTabID(from: info) { id in
             move(id, clearingDragState: false)
@@ -131,9 +161,21 @@ struct TabReorderDropDelegate: DropDelegate {
 
     func dropExited(info: DropInfo) {
         isTargeted?.wrappedValue = false
+        if splitHover?.wrappedValue == splitTargetID { splitHover?.wrappedValue = nil }
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        // Drop in the center band → split the two tabs; otherwise reorder.
+        if let sid = splitTargetID, inSplitBand(info) {
+            splitHover?.wrappedValue = nil
+            let dragged = draggingID
+            resolveDraggedTabID(from: info) { id in
+                if let id = id ?? dragged { store.splitTabs(id, with: sid) }
+                draggingID = nil
+                isTargeted?.wrappedValue = false
+            }
+            return true
+        }
         // Commit the move here too: `dropEntered` gives live reordering while the
         // cursor moves, but it can miss (small targets, layout shifting under the
         // pointer as a folder expands). Releasing always lands the tab.

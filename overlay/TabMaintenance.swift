@@ -25,8 +25,12 @@ extension BrowserStore {
         if let id = splitTabID { ids.insert(id) }
         // Never sleep a tab that's actively playing audio/video (e.g. a YouTube
         // tab in the background) or one torn off into its own window — both are
-        // "active" even though they aren't the selected tab.
-        for tab in tabs where tab.isAudible || tab.isDetached {
+        // "active" even though they aren't the selected tab. Also honor the
+        // per-tab "Keep Awake" opt-out. This is the single choke point for every
+        // sleep path (auto-sleep, Sleep Background Tabs, manual Sleep Tab) and
+        // feeds archiveProtectedIDs, so a kept-awake tab is exempt from all of
+        // them.
+        for tab in tabs where tab.isAudible || tab.isDetached || tab.keepAwake {
             ids.insert(tab.id)
         }
         return ids
@@ -95,6 +99,22 @@ extension BrowserStore {
         tab.sleep()
         objectWillChange.send()
         ToastCenter.shared.show("Tab put to sleep", icon: "moon.zzz", style: .success)
+    }
+
+    /// Toggle a tab's "Keep Awake" opt-out (exempts it from sleeping/archiving).
+    func toggleKeepAwake(_ id: BrowserTab.ID) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        tab.keepAwake.toggle()
+        objectWillChange.send()
+        scheduleSessionSave()
+        ToastCenter.shared.show(
+            tab.keepAwake ? "Tab will stay awake" : "Tab can sleep again",
+            icon: tab.keepAwake ? "sun.max" : "moon.zzz", style: .success)
+    }
+
+    /// Whether a tab is currently opted out of sleeping (for the menu checkmark).
+    func isKeptAwake(_ id: BrowserTab.ID) -> Bool {
+        tabs.first(where: { $0.id == id })?.keepAwake ?? false
     }
 
     /// Sleep every eligible background tab right now (memory relief on demand).

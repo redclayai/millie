@@ -37,7 +37,7 @@ struct TabRow: View {
             Favicon(icon: tab.faviconURL, page: tab.urlString,
                     image: tab.faviconImage,
                     size: 15,
-                    active: (isSelected || hovering) && !tab.isAsleep)
+                    active: (showsActive || hovering) && !tab.isAsleep)
                 .grayscale(tab.isAsleep ? 1 : 0)
                 .opacity(tab.isAsleep ? 0.5 : 1)
                 // A plain tap gesture (not a Button) so it coexists with the
@@ -60,8 +60,8 @@ struct TabRow: View {
             } else {
                 Text(tab.displayTitle)
                     .font(Typography.ui(Typography.base))
-                    .foregroundStyle(isSelected ? p.sidebarForeground.color
-                                                : p.sidebarForeground.color.opacity(tab.isAsleep ? 0.5 : 0.78))
+                    .foregroundStyle(showsActive ? p.sidebarForeground.color
+                                                 : p.sidebarForeground.color.opacity(tab.isAsleep ? 0.5 : 0.78))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -79,6 +79,15 @@ struct TabRow: View {
                 }
                 .buttonStyle(.plain)
                 .help(tab.isMuted ? "Unmute tab" : "Mute tab")
+            }
+
+            // Marks both halves of an active split so the pairing is visible
+            // in the sidebar.
+            if isInSplit {
+                Icon(name: "rectangle.split.2x1", size: 11)
+                    .foregroundStyle(p.sidebarForeground.color.opacity(0.7))
+                    .frame(width: 18, height: 18)
+                    .help("Part of the current split view")
             }
 
             Button(action: onClose) {
@@ -107,9 +116,9 @@ struct TabRow: View {
         .background(
             RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
                 .fill(backgroundFill)
-                .shadow(color: isSelected ? TabSurface.shadow(scheme) : .clear,
-                        radius: isSelected ? TabSurface.shadowRadius : 0,
-                        x: 0, y: isSelected ? TabSurface.shadowY : 0)
+                .shadow(color: showsActive ? TabSurface.shadow(scheme) : .clear,
+                        radius: showsActive ? TabSurface.shadowRadius : 0,
+                        x: 0, y: showsActive ? TabSurface.shadowY : 0)
                 .transaction { transaction in
                     transaction.animation = nil
                 }
@@ -141,12 +150,27 @@ struct TabRow: View {
         isEditing = false
     }
 
+    /// This tab is the split partner (the non-selected half of an active split).
+    private var isSplitPartner: Bool {
+        store.splitTabID != nil && store.splitTabID == tab.id
+    }
+
+    /// Either half of an active split — both are marked in the sidebar.
+    private var isInSplit: Bool {
+        store.splitTabID != nil
+            && (tab.id == store.selectedTabID || tab.id == store.splitTabID)
+    }
+
+    /// Rows that get the "active" treatment: the selected tab and, while a
+    /// split is up, its partner too.
+    private var showsActive: Bool { isSelected || isSplitPartner }
+
     private var showsCloseButton: Bool {
-        isSelected || hovering
+        showsActive || hovering
     }
 
     private var backgroundFill: Color {
-        if isSelected || (pressing && !closeHovering) {
+        if showsActive || (pressing && !closeHovering) {
             return TabSurface.selectedFill(scheme)
         }
         if hovering { return TabSurface.hoverFill(scheme) }
