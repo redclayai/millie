@@ -154,6 +154,7 @@ struct ExtensionsMenu: View {
 
     @ObservedObject private var extensions = ExtensionStore.shared
     @ObservedObject private var settings = BrowserSettings.shared
+    @ObservedObject private var adBlock = AdBlockStore.shared
     @Environment(\.palette) private var p
 
     @State private var devMode = false
@@ -254,6 +255,14 @@ struct ExtensionsMenu: View {
                    value: settings.autoPiP ? "Allowed" : "Off",
                    on: settings.autoPiP) {
             settings.autoPiP.toggle()
+        }
+        settingRow(icon: "shield.fill",
+                   title: "Block Ads",
+                   value: settings.blockAds
+                       ? "\(adBlock.blockedThisSession) blocked this session"
+                       : "Off",
+                   on: settings.blockAds) {
+            settings.blockAds.toggle()
         }
     }
 
