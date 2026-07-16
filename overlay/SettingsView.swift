@@ -156,6 +156,15 @@ struct SettingsView: View {
                 EnumMenu(selection: $settings.newTabBehavior,
                          options: NewTabBehavior.allCases) { $0.label }
             }
+            Field(label: "Import") {
+                Button("Import from another browser…") {
+                    store.settingsVisible = false
+                    store.presentImportPanel()
+                }
+                .buttonStyle(.plain)
+                .font(Typography.ui(Typography.base, weight: .medium))
+                .foregroundStyle(p.primary.color)
+            }
         }
     }
 

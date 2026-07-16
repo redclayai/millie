@@ -1,0 +1,25 @@
+# Millie "Import from your old browser": the BUILD.gn hunks adding the
+# importer's C++ + Swift sources to //chrome/browser/ui (fold into
+# chromium-tree.patch on the next 150 regeneration). All other import code
+# lives in overlay/ (mori_import.*, BrowserImporter.swift, ImportPanel.swift).
+
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -3227,6 +3227,8 @@
+       "mori/mori_chrome_extensions.mm",
+       "mori/mori_chrome_hooks.h",
++      "mori/mori_import.h",
++      "mori/mori_import.mm",
+       "mori/mori_permission_prompt.h",
+       "mori/mori_permission_prompt.mm",
+@@ -5760,6 +5762,7 @@
+       "mori/BrowserContext.swift",
++      "mori/BrowserImporter.swift",
+       "mori/BrowserSettings.swift",
+       "mori/BrowserStore+DragDrop.swift",
+@@ -5786,6 +5789,7 @@
+       "mori/HistoryStore.swift",
+       "mori/Icon.swift",
++      "mori/ImportPanel.swift",
+       "mori/LauncherOverlay.swift",
+       "mori/LibraryPanel.swift",
