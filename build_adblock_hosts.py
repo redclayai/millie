@@ -69,6 +69,19 @@ def hosts_from(text, kind):
             yield h
 
 
+# Upstream false positives: bare product domains whose presence blocks an
+# entire app (the C++ matcher walks parent domains, so `powerbi.com` kills
+# every app.powerbi.com subresource). Excluded at build time; the telemetry
+# subdomains of these products remain separately listed and blocked.
+ALLOWLIST = {
+    "powerbi.com",      # broke app.powerbi.com entirely (2026-07-16)
+    "salesforce.com",
+    "intercom.io",      # support chat widgets + app.intercom.io
+    "datadoghq.com",
+    "tableau.com",
+}
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "overlay/adhosts.bin"
     prefixes = set()
@@ -80,6 +93,8 @@ def main():
             continue
         n = 0
         for host in hosts_from(text, kind):
+            if host in ALLOWLIST:
+                continue
             digest = hashlib.sha256(host.encode("utf-8")).digest()
             prefixes.add(struct.unpack(">Q", digest[:8])[0])
             n += 1
