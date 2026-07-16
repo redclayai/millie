@@ -132,6 +132,14 @@ struct GradientTheme: Codable, Equatable {
     /// persisted JSON (without this key) still decodes.
     var presetID: String? = nil
 
+    // Gradient shaping (all default to the classic look; back-compat-decoded).
+    /// Blend/softness: 0 = tight, distinct color blobs; 1 = one smooth wash.
+    var blend: Double = 0.5
+    /// Rotation of the gradient, in degrees.
+    var angle: Double = 0
+    /// Strength/reach of the color blooms (0.4 subtle … 1.6 vivid).
+    var intensity: Double = 1
+
     enum SchemeMode: String, Codable, CaseIterable, Identifiable {
         case auto, light, dark
         var id: String { rawValue }
@@ -193,4 +201,26 @@ struct GradientTheme: Codable, Equatable {
     }
 
     var isSolid: Bool { solidHex != nil }
+}
+
+extension GradientTheme {
+    // Defined in an extension so the memberwise initializer is preserved for the
+    // many `GradientTheme(dots:opacity:texture:schemeOverride:)` call sites.
+    // `encode(to:)` is synthesized from these keys.
+    enum CodingKeys: String, CodingKey {
+        case dots, opacity, texture, schemeOverride, presetID, blend, angle, intensity
+    }
+
+    // Custom decode so themes saved before the shaping fields existed still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dots = try c.decodeIfPresent([GradientDot].self, forKey: .dots) ?? []
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 0.5
+        texture = try c.decodeIfPresent(Double.self, forKey: .texture) ?? 0
+        schemeOverride = try c.decodeIfPresent(SchemeMode.self, forKey: .schemeOverride) ?? .auto
+        presetID = try c.decodeIfPresent(String.self, forKey: .presetID)
+        blend = try c.decodeIfPresent(Double.self, forKey: .blend) ?? 0.5
+        angle = try c.decodeIfPresent(Double.self, forKey: .angle) ?? 0
+        intensity = try c.decodeIfPresent(Double.self, forKey: .intensity) ?? 1
+    }
 }

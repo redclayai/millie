@@ -517,6 +517,7 @@ private struct FolderRow: View {
     @State private var isEditing = false
     @State private var draftName = ""
     @State private var showIconPicker = false
+    @State private var splitDropTargetID: BrowserTab.ID?
     @FocusState private var nameFocused: Bool
 
     private var childTabs: [BrowserTab] { store.tabs(in: folder) }
@@ -631,6 +632,13 @@ private struct FolderRow: View {
                     )
                     .padding(.leading, 16)
                     .transition(.tabClose)
+                    .overlay {
+                        if splitDropTargetID == tab.id {
+                            RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
+                                .strokeBorder(p.primary.color, lineWidth: 2)
+                                .padding(.leading, 16)
+                        }
+                    }
                     .contextMenu { TabMenu(store: store, tab: tab) }
                     .onDrag {
                         draggingTabID = tab.id
@@ -645,7 +653,9 @@ private struct FolderRow: View {
                     .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
                         target: .folder(id: folder.id, index: idx),
                         draggingID: $draggingTabID,
-                        store: store))
+                        store: store,
+                        splitTargetID: tab.id,
+                        splitHover: $splitDropTargetID))
                 }
             }
         }
@@ -681,6 +691,8 @@ private struct LooseTabList: View {
     @ObservedObject var store: BrowserStore
     @Binding var draggingTabID: BrowserTab.ID?
     @State private var appendDropTargeted = false
+    @State private var splitDropTargetID: BrowserTab.ID?
+    @Environment(\.palette) private var p
 
     var body: some View {
         LazyVStack(spacing: 4) {
@@ -693,6 +705,12 @@ private struct LooseTabList: View {
                     onClose: { store.closeTab(tab.id) }
                 )
                 .transition(.tabClose)
+                .overlay {
+                    if splitDropTargetID == tab.id {
+                        RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
+                            .strokeBorder(p.primary.color, lineWidth: 2)
+                    }
+                }
                 .contextMenu { TabMenu(store: store, tab: tab) }
                 .onDrag {
                     draggingTabID = tab.id
@@ -707,7 +725,9 @@ private struct LooseTabList: View {
                 .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
                     target: .loose(index: idx),
                     draggingID: $draggingTabID,
-                    store: store))
+                    store: store,
+                    splitTargetID: tab.id,
+                    splitHover: $splitDropTargetID))
             }
 
             // Catch zone: dropping in the empty area below the rows appends to
@@ -806,14 +826,29 @@ struct TabMenu: View {
             .disabled(!tab.urlString.hasPrefix("http"))
         Divider()
         if store.selectedTabID != tab.id, !tab.isDetached {
-            Button("Open in Split View") { store.splitWith(tab.id, side: .right) }
+            Menu("Add Split View") {
+                Button("Split Right") { store.splitWith(tab.id, side: .right) }
+                Button("Split Left") { store.splitWith(tab.id, side: .left) }
+            }
         }
         Button("Open in New Window") { store.popOutTab(tab.id) }
             .disabled(tab.isDetached)
         Button("Duplicate Tab") { store.duplicateTab(tab.id) }
         Button("Copy URL") { store.copyURL(of: tab.id) }
+        ShareMenu(urlString: tab.urlString)
         Divider()
-        if tab.hasRealized, !tab.isAsleep,
+        Button {
+            store.toggleKeepAwake(tab.id)
+        } label: {
+            if store.isKeptAwake(tab.id) {
+                Label("Keep Awake", systemImage: "checkmark")
+            } else {
+                Text("Keep Awake")
+            }
+        }
+        // Manual sleep is a no-op on a kept-awake tab (it's sleep-protected), so
+        // hide it there rather than offer a dead action.
+        if tab.hasRealized, !tab.isAsleep, !store.isKeptAwake(tab.id),
            store.selectedTabID != tab.id, store.splitTabID != tab.id {
             Button("Sleep Tab") { store.sleepTab(tab.id) }
         }
@@ -1027,5 +1062,49 @@ private struct SpaceSwipeCatcher: NSViewRepresentable {
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
+/// A "Share" submenu for a page URL: Copy Link plus the native macOS sharing
+/// services (AirDrop, Mail, Messages, Notes, Reminders, …), matching the system
+/// share sheet. Enumerates the services that accept the URL and performs the one
+/// the user picks. Disabled for non-web pages (nothing to share).
+struct ShareMenu: View {
+    let urlString: String
+
+    var body: some View {
+        Menu("Share") {
+            Button("Copy Link") {
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(urlString, forType: .string)
+                ToastCenter.shared.show("Link copied", icon: "link", style: .success)
+            }
+            let services = shareServices
+            if !services.isEmpty {
+                Divider()
+                ForEach(Array(services.enumerated()), id: \.offset) { _, service in
+                    Button {
+                        guard let url = URL(string: urlString) else { return }
+                        service.perform(withItems: [url])
+                    } label: {
+                        Label { Text(service.title) } icon: { Image(nsImage: service.image) }
+                    }
+                }
+            }
+        }
+        .disabled(!isShareable)
+    }
+
+    private var isShareable: Bool {
+        urlString.hasPrefix("http://") || urlString.hasPrefix("https://")
+    }
+
+    private var shareServices: [NSSharingService] {
+        guard isShareable, let url = URL(string: urlString) else { return [] }
+        // Deprecated in macOS 13 in favor of NSSharingServicePicker, but it's the
+        // only way to render the services inline as menu items (the picker shows
+        // its own popover). Still fully functional.
+        return NSSharingService.sharingServices(forItems: [url])
     }
 }

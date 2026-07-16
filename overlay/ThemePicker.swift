@@ -365,3 +365,224 @@ private struct SelectionRing: View {
         }
     }
 }
+
+// MARK: - Interactive gradient workshop
+
+/// A Zen-style live gradient editor: drag up to three color dots around a
+/// hue/saturation wheel, add/remove them, recolor from a palette, toggle the
+/// light/dark scheme, and tune the chrome opacity + grain. Binds directly to a
+/// `GradientTheme`, so edits apply live wherever the binding is wired (the
+/// active Profile's wash). Reuses `GradientEngine` for all color math.
+struct GradientWorkshop: View {
+    @Binding var theme: GradientTheme
+    @Environment(\.palette) private var p
+    @State private var selected: UUID?
+
+    private let paletteCols = [GridItem(.adaptive(minimum: 24), spacing: 6, alignment: .leading)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            preview
+            wheel
+            controlBar
+            palette
+            sliders
+        }
+    }
+
+    // Live preview of the current wash.
+    private var preview: some View {
+        ZStack {
+            if theme.dots.isEmpty {
+                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                    .fill(p.input.color.opacity(0.5))
+                Text("No theme — add a dot to start")
+                    .font(Typography.ui(Typography.label))
+                    .foregroundStyle(p.mutedForeground.color)
+            } else {
+                GradientMesh(colors: theme.dots.map(\.rgb.color),
+                             blend: CGFloat(theme.blend),
+                             angle: theme.angle,
+                             intensity: CGFloat(theme.intensity))
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.md, style: .continuous))
+            }
+        }
+        .frame(height: 40)
+        .overlay(RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+            .strokeBorder(p.border.color.opacity(0.5), lineWidth: 1))
+    }
+
+    private var wheel: some View {
+        GeometryReader { geo in
+            let d = min(geo.size.width, geo.size.height)
+            ZStack {
+                Circle()
+                    .fill(AngularGradient(gradient: Gradient(colors: hueRing),
+                                          center: .center, angle: .degrees(0)))
+                    .overlay(Circle().fill(RadialGradient(
+                        colors: [.white, .white.opacity(0)],
+                        center: .center, startRadius: 0, endRadius: d / 2)))
+                    .overlay(Circle().strokeBorder(p.border.color.opacity(0.5), lineWidth: 1))
+                ForEach(theme.dots) { dot in
+                    dotHandle(dot, diameter: d)
+                }
+            }
+            .frame(width: d, height: d)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(height: 186)
+    }
+
+    private var hueRing: [Color] {
+        stride(from: 0.0, through: 360.0, by: 30.0)
+            .map { GradientEngine.hslToRGB(h: $0, s: 1, l: 0.5).color }
+    }
+
+    private func dotHandle(_ dot: GradientDot, diameter d: CGFloat) -> some View {
+        let sz: CGFloat = dot.isPrimary ? 24 : 18
+        return Circle()
+            .fill(dot.rgb.color)
+            .frame(width: sz, height: sz)
+            .overlay(Circle().strokeBorder(.white,
+                                           lineWidth: selected == dot.id ? 3 : 2))
+            .shadow(color: .black.opacity(0.28), radius: 2, y: 1)
+            .position(x: dot.x * d, y: dot.y * d)
+            .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+                selected = dot.id
+                moveDot(dot.id, to: v.location, in: d)
+            })
+    }
+
+    private var controlBar: some View {
+        HStack(spacing: 6) {
+            ForEach(GradientTheme.SchemeMode.allCases) { mode in
+                Button { theme.schemeOverride = mode } label: {
+                    Icon(name: mode.symbol, size: 12)
+                        .foregroundStyle(theme.schemeOverride == mode
+                                         ? p.primaryForeground.color : p.mutedForeground.color)
+                        .frame(width: 30, height: 26)
+                        .background(RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                            .fill(theme.schemeOverride == mode ? p.primary.color : .clear))
+                }
+                .buttonStyle(.plain)
+                .help(mode.label)
+            }
+            Spacer()
+            Button { removeDot() } label: {
+                Icon(name: "minus", size: 12).foregroundStyle(p.foreground.color)
+                    .frame(width: 28, height: 26)
+            }
+            .buttonStyle(.plain).disabled(theme.dots.count <= 1).help("Remove dot")
+            Button { addDot() } label: {
+                Icon(name: "plus", size: 12).foregroundStyle(p.foreground.color)
+                    .frame(width: 28, height: 26)
+            }
+            .buttonStyle(.plain).disabled(theme.dots.count >= 3).help("Add dot")
+        }
+    }
+
+    private var palette: some View {
+        LazyVGrid(columns: paletteCols, alignment: .leading, spacing: 6) {
+            ForEach(SolidPalette.swatches, id: \.self) { hex in
+                Circle()
+                    .fill(TokenColor(hex: hex).color)
+                    .frame(width: 20, height: 20)
+                    .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 1))
+                    .contentShape(Circle())
+                    .onTapGesture { recolorSelected(TokenColor(hex: hex)) }
+                    .help(hex)
+            }
+        }
+    }
+
+    private var sliders: some View {
+        VStack(spacing: 8) {
+            slider("Blend", value: $theme.blend, range: 0...1)
+            slider("Angle", value: $theme.angle, range: 0...360)
+            slider("Intensity", value: $theme.intensity, range: 0.4...1.6)
+            slider("Opacity", value: $theme.opacity,
+                   range: GradientTheme.minOpacity...GradientTheme.maxOpacity)
+            slider("Texture", value: $theme.texture, range: 0...1)
+        }
+        .opacity(theme.dots.isEmpty ? 0.4 : 1)
+        .disabled(theme.dots.isEmpty)
+    }
+
+    private func slider(_ title: String, value: Binding<Double>,
+                        range: ClosedRange<Double>) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(Typography.ui(Typography.label))
+                .foregroundStyle(p.mutedForeground.color)
+                .frame(width: 52, alignment: .leading)
+            Slider(value: value, in: range)
+        }
+    }
+
+    // MARK: Mutations
+
+    private func moveDot(_ id: UUID, to loc: CGPoint, in d: CGFloat) {
+        guard let i = theme.dots.firstIndex(where: { $0.id == id }) else { return }
+        let c = d / 2
+        var dx = loc.x - c, dy = loc.y - c
+        let r = hypot(dx, dy)
+        if r > c, r > 0 { dx = dx / r * c; dy = dy / r * c }   // clamp into the wheel
+        let nx = (dx + c) / d, ny = (dy + c) / d
+        theme.dots[i].x = Double(nx)
+        theme.dots[i].y = Double(ny)
+        theme.dots[i].rgb = GradientEngine.colorFromPosition(CGPoint(x: nx, y: ny),
+                                                             lightness: theme.dots[i].lightness)
+        theme.dots[i].isCustom = true
+        theme.presetID = nil
+    }
+
+    private func addDot() {
+        guard theme.dots.count < 3 else { return }
+        if theme.dots.isEmpty {
+            let pos = CGPoint(x: 0.34, y: 0.42)
+            let dot = GradientDot(rgb: GradientEngine.colorFromPosition(pos, lightness: 55),
+                                  x: Double(pos.x), y: Double(pos.y), lightness: 55,
+                                  isPrimary: true, isCustom: true)
+            theme = GradientTheme(dots: [dot], opacity: 0.6, texture: theme.texture,
+                                  schemeOverride: theme.schemeOverride)
+            selected = dot.id
+            return
+        }
+        let base = theme.primaryDot?.position ?? CGPoint(x: 0.5, y: 0.5)
+        let pos = CGPoint(x: min(max(1 - base.x, 0.16), 0.84),
+                          y: min(max(1 - base.y, 0.16), 0.84))
+        let dot = GradientDot(rgb: GradientEngine.colorFromPosition(pos, lightness: 55),
+                              x: Double(pos.x), y: Double(pos.y), lightness: 55, isCustom: true)
+        theme.dots.append(dot)
+        theme.presetID = nil
+        selected = dot.id
+    }
+
+    private func removeDot() {
+        guard theme.dots.count > 1 else { return }
+        let target = selected
+            ?? theme.dots.last(where: { !$0.isPrimary })?.id
+            ?? theme.dots.last?.id
+        theme.dots.removeAll { $0.id == target }
+        if !theme.dots.contains(where: { $0.isPrimary }), !theme.dots.isEmpty {
+            theme.dots[0].isPrimary = true
+        }
+        theme.presetID = nil
+        selected = theme.dots.first?.id
+    }
+
+    private func recolorSelected(_ tc: TokenColor) {
+        if theme.dots.isEmpty { addDot() }
+        let id = selected ?? theme.primaryDot?.id
+        guard let id, let i = theme.dots.firstIndex(where: { $0.id == id }) else { return }
+        let rgb = RGB(tc)
+        let (pos, light) = GradientEngine.positionFromColor(rgb)
+        theme.dots[i].rgb = rgb
+        theme.dots[i].x = Double(pos.x)
+        theme.dots[i].y = Double(pos.y)
+        theme.dots[i].lightness = light
+        theme.dots[i].isCustom = true
+        theme.presetID = nil
+        selected = id
+    }
+}

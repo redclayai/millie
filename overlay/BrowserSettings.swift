@@ -135,6 +135,16 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(autoSleepMinutes, forKey: Key.autoSleepMinutes) }
     }
 
+    /// Split view: the left pane's fraction of the width (0.2…0.8). Persisted so
+    /// the user's preferred split ratio survives restarts and new splits.
+    @Published var splitRatio: Double {
+        didSet {
+            let clamped = min(max(splitRatio, 0.2), 0.8)
+            if clamped != splitRatio { splitRatio = clamped; return }
+            defaults.set(splitRatio, forKey: Key.splitRatio)
+        }
+    }
+
     /// Auto-archive background tabs (closed to the restorable Archive, Arc-style)
     /// after this many hours untouched. 0 disables auto-archive.
     @Published var autoArchiveHours: Int {
@@ -206,6 +216,7 @@ final class BrowserSettings: ObservableObject {
         static let autoPiP = "mori.autoPiP"
         static let gradientTheme = "mori.gradientTheme"
         static let autoSleepMinutes = "mori.autoSleepMinutes"
+        static let splitRatio = "mori.splitRatio"
         static let autoArchiveHours = "mori.autoArchiveHours"
         static let tabCycleOrder = "mori.tabCycleOrder"
     }
@@ -252,6 +263,7 @@ final class BrowserSettings: ObservableObject {
             ?? .none
         autoPiP = defaults.object(forKey: Key.autoPiP) as? Bool ?? true
         autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 60
+        splitRatio = defaults.object(forKey: Key.splitRatio) as? Double ?? 0.5
         autoArchiveHours = defaults.object(forKey: Key.autoArchiveHours) as? Int ?? 24
         // Default to Arc/Dia behavior: Ctrl+Tab walks most-recently-used tabs.
         tabCycleOrder = TabCycleOrder(rawValue: defaults.string(forKey: Key.tabCycleOrder) ?? "")
