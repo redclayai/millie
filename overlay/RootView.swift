@@ -88,6 +88,11 @@ struct RootView: View {
             BoostEditorOverlay(store: store)
                 .ignoresSafeArea()
         }
+        // "Import from your old browser" (Arc-style data import).
+        .overlay {
+            ImportPanelOverlay(store: store)
+                .ignoresSafeArea()
+        }
         // Transient Peek preview (Little Arc-style link glance).
         .overlay {
             PeekOverlay(store: store)

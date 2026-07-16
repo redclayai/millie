@@ -26,6 +26,8 @@ final class BrowserStore: ObservableObject {
     @Published var boostEditorVisible: Bool = false
     /// Host currently loaded into the Boost editor.
     var boostEditorHost: String = ""
+    /// The "Import from your old browser" overlay.
+    @Published var importPanelVisible: Bool = false
     /// True while the click-to-zap element picker is armed on the active page.
     @Published var zapModeActive: Bool = false
     /// Ephemeral tab shown in the Peek overlay (Little Arc-style transient

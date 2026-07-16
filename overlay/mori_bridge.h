@@ -3,6 +3,7 @@
 // Xcode app's Millie-Bridging-Header.h.
 #import "MoriBrowserView.h"
 #import "MoriPrivacy.h"
+#import "mori_import.h"
 
 // Chrome-layer extensions (real Chromium extension service; chrome fork only).
 // Every method must be called on the main (browser UI) thread.
