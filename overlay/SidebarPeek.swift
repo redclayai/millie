@@ -45,6 +45,12 @@ final class PeekContainerView: NSView {
     private let model = PeekModel()
     private var hosting: NSHostingView<AnyView>?
     private var closeWork: DispatchWorkItem?
+    /// Gates the peek from firing the instant the sidebar is hidden: if the
+    /// cursor is still in the edge band right after a hide (e.g. the user just
+    /// hit ⌘S with the pointer near the sidebar), we wait until it leaves the
+    /// band once before allowing a hover to re-open. Otherwise an explicit hide
+    /// would be undone immediately and read as "it won't stay hidden."
+    private var armed = false
 
     /// Cursor band at the selected edge that triggers the peek when closed.
     private let edgeWidth: CGFloat = 12
@@ -84,7 +90,14 @@ final class PeekContainerView: NSView {
         hosting?.appearance = appearance
         if model.enabled != enabled {
             model.enabled = enabled
-            if !enabled { setOpen(false) }
+            if !enabled {
+                setOpen(false)
+            } else {
+                // Just became hidden. Only arm the hover-peek once the cursor is
+                // confirmed outside the edge band, so a hide with the pointer
+                // near the edge doesn't bounce the sidebar straight back open.
+                armed = !cursorInEdgeBand()
+            }
         }
         rebuild()
     }
@@ -134,10 +147,20 @@ final class PeekContainerView: NSView {
             } else {
                 scheduleClose()
             }
-        } else if isInEdgeBand(x) {
+        } else if !isInEdgeBand(x) {
+            // Cursor is clear of the edge — a subsequent entry is a real peek.
+            armed = true
+        } else if armed {
             closeWork?.cancel()
             setOpen(true)
         }
+    }
+
+    /// Whether the pointer is currently within the edge trigger band.
+    private func cursorInEdgeBand() -> Bool {
+        guard let window else { return false }
+        let x = convert(window.mouseLocationOutsideOfEventStream, from: nil).x
+        return isInEdgeBand(x)
     }
 
     private func isInEdgeBand(_ x: CGFloat) -> Bool {
