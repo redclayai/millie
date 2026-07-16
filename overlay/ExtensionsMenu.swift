@@ -158,6 +158,7 @@ struct ExtensionsMenu: View {
 
     @State private var devMode = false
     @State private var siteBlocked = false
+    @State private var adsAllowed = false
 
     // The active page as a web URL (nil on chrome:// / start pages).
     private var siteURL: String? {
@@ -188,6 +189,7 @@ struct ExtensionsMenu: View {
             extensions.refresh()
             devMode = MoriChromeExtensions.developerMode()
             if let s = siteURL { siteBlocked = extensions.areExtensionsBlocked(onSite: s) }
+            if let h = siteHost { adsAllowed = AdBlockStore.shared.isAllowed(host: h) }
         }
     }
 
@@ -336,6 +338,15 @@ struct ExtensionsMenu: View {
                         extensions.setExtensionsBlocked(v, onSite: s)
                         store.reload()
                     }))
+                if settings.blockAds, let host = siteHost {
+                    Toggle("Don't block ads on this site", isOn: Binding(
+                        get: { adsAllowed },
+                        set: { v in
+                            adsAllowed = v
+                            AdBlockStore.shared.setAllowed(v, host: host)
+                            store.reload()
+                        }))
+                }
                 Button("All Site Settings…") { openSiteSettings(); dismiss() }
             }
         } label: {

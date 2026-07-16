@@ -13,6 +13,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
@@ -2099,6 +2100,18 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
 
 + (void)setAdBlockerEnabled:(BOOL)enabled {
   mori::SetAdBlockEnabled(enabled);
+}
+
++ (void)setAdBlockerAllowedHosts:(NSArray<NSString*>*)hosts {
+  std::vector<std::string> list;
+  list.reserve(hosts.count);
+  for (NSString* host in hosts) {
+    const char* utf8 = host.UTF8String;
+    if (utf8 && *utf8) {
+      list.emplace_back(utf8);
+    }
+  }
+  mori::SetAdBlockAllowedHosts(std::move(list));
 }
 
 + (BOOL)cancelDownloadWithID:(uint32_t)downloadID {

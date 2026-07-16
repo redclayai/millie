@@ -16,6 +16,8 @@
 #define CHROME_BROWSER_UI_MORI_MORI_ADBLOCK_H_
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 class GURL;
 namespace network {
@@ -38,11 +40,25 @@ bool AdBlockShouldBlock(const GURL& url);
 // Total subresource requests cancelled this session (for the Settings readout).
 uint64_t AdBlockBlockedCount();
 
+// Replaces the per-site allowlist ("Don't block ads on this site"), driven by
+// AdBlockStore.swift via +[MoriBrowserView setAdBlockerAllowedHosts:]. Until
+// that fires, the first lookup falls back to the same persisted
+// `mori.adblockAllowlist` defaults array the Swift store writes. Matching is
+// exact against the normalized top-frame host — the toggle grants the page the
+// user was on, not its whole domain tree.
+void SetAdBlockAllowedHosts(std::vector<std::string> hosts);
+
+// True when the request's first-party (top-frame) host is on the allowlist.
+bool AdBlockFirstPartyAllowed(const std::string& first_party_host);
+
 // Inserts the ad-block proxying URLLoaderFactory into `factory_builder` when ad
 // blocking is enabled and this is a subresource factory. No-op otherwise.
+// `first_party_host` is the top-frame origin's host (from the IsolationInfo),
+// consulted per-request against the user allowlist.
 // Called from ChromeContentBrowserClient::WillCreateURLLoaderFactory.
 void MaybeProxyAdblock(network::URLLoaderFactoryBuilder& factory_builder,
-                       bool is_subresource);
+                       bool is_subresource,
+                       const std::string& first_party_host);
 
 }  // namespace mori
 
