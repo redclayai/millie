@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -13,6 +14,7 @@
 
 #include "base/functional/bind.h"
 #include "base/no_destructor.h"
+#include "base/synchronization/lock.h"
 #include "chrome/browser/ui/mori/mori_adblock.h"
 #include "crypto/sha2.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
@@ -117,6 +119,40 @@ std::string NormalizeHost(std::string_view host_view) {
   return host;
 }
 
+// The per-site allowlist ("Don't block ads on this site"). Lock-guarded:
+// replaced wholesale from the Swift store on the main thread while lookups run
+// on whichever sequence dispatches the proxy factory's mojo calls.
+struct AdAllowlist {
+  base::Lock lock;
+  std::set<std::string> hosts;
+  bool loaded = false;
+};
+
+AdAllowlist& Allowlist() {
+  static base::NoDestructor<AdAllowlist> instance;
+  return *instance;
+}
+
+// Seeds the allowlist from the persisted defaults array the Swift store writes
+// (same lazy-fallback pattern as AdBlockEnabled: requests can arrive before
+// AdBlockStore pushes). Caller holds the lock.
+void LoadAllowlistFromDefaultsLocked(AdAllowlist& allowlist) {
+  @autoreleasepool {
+    NSArray* saved = [[NSUserDefaults standardUserDefaults]
+        arrayForKey:@"mori.adblockAllowlist"];
+    for (id entry in saved) {
+      if (![entry isKindOfClass:[NSString class]]) {
+        continue;
+      }
+      const char* utf8 = [(NSString*)entry UTF8String];
+      if (utf8 && *utf8) {
+        allowlist.hosts.insert(NormalizeHost(utf8));
+      }
+    }
+  }
+  allowlist.loaded = true;
+}
+
 void PostBlockedNotification() {
   if (g_notify_pending.exchange(true, std::memory_order_relaxed)) {
     return;  // a post is already queued; this block folds into it.
@@ -142,9 +178,11 @@ class MoriAdblockURLLoaderFactory : public network::mojom::URLLoaderFactory {
   MoriAdblockURLLoaderFactory& operator=(const MoriAdblockURLLoaderFactory&) =
       delete;
 
-  static void Install(network::URLLoaderFactoryBuilder& factory_builder) {
+  static void Install(network::URLLoaderFactoryBuilder& factory_builder,
+                      std::string first_party_host) {
     auto [receiver, target] = factory_builder.Append();
-    new MoriAdblockURLLoaderFactory(std::move(receiver), std::move(target));
+    new MoriAdblockURLLoaderFactory(std::move(receiver), std::move(target),
+                                    std::move(first_party_host));
   }
 
   // network::mojom::URLLoaderFactory:
@@ -162,7 +200,10 @@ class MoriAdblockURLLoaderFactory : public network::mojom::URLLoaderFactory {
     // and never reaches us. (Do NOT guard on is_outermost_main_frame: that flag
     // is true for any request originating in the top frame, including its
     // subresources, so it would suppress all blocking.)
-    if (AdBlockEnabled() && AdBlockShouldBlock(request.url)) {
+    // The allowlist check runs after the blocklist hit so the common case (an
+    // unlisted host) never takes the allowlist lock.
+    if (AdBlockEnabled() && AdBlockShouldBlock(request.url) &&
+        !AdBlockFirstPartyAllowed(first_party_host_)) {
       g_blocked_count.fetch_add(1, std::memory_order_relaxed);
       PostBlockedNotification();
       // Complete the request as blocked; never open a URLLoader. The queued
@@ -186,7 +227,9 @@ class MoriAdblockURLLoaderFactory : public network::mojom::URLLoaderFactory {
  private:
   MoriAdblockURLLoaderFactory(
       mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver,
-      mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory) {
+      mojo::PendingRemote<network::mojom::URLLoaderFactory> target_factory,
+      std::string first_party_host)
+      : first_party_host_(std::move(first_party_host)) {
     target_factory_.Bind(std::move(target_factory));
     target_factory_.set_disconnect_handler(base::BindOnce(
         &MoriAdblockURLLoaderFactory::OnTargetDisconnect,
@@ -208,6 +251,9 @@ class MoriAdblockURLLoaderFactory : public network::mojom::URLLoaderFactory {
 
   mojo::ReceiverSet<network::mojom::URLLoaderFactory> proxy_receivers_;
   mojo::Remote<network::mojom::URLLoaderFactory> target_factory_;
+  // Host of the top-frame origin this factory serves (empty when unknown or
+  // opaque), matched against the per-site allowlist.
+  const std::string first_party_host_;
 };
 
 }  // namespace
@@ -241,6 +287,32 @@ uint64_t AdBlockBlockedCount() {
   return g_blocked_count.load(std::memory_order_relaxed);
 }
 
+void SetAdBlockAllowedHosts(std::vector<std::string> hosts) {
+  AdAllowlist& allowlist = Allowlist();
+  base::AutoLock scoped(allowlist.lock);
+  allowlist.hosts.clear();
+  for (const std::string& host : hosts) {
+    std::string normalized = NormalizeHost(host);
+    if (!normalized.empty()) {
+      allowlist.hosts.insert(std::move(normalized));
+    }
+  }
+  allowlist.loaded = true;
+  NSLog(@"MILLIE_ADBLOCK allowlist n=%zu", allowlist.hosts.size());
+}
+
+bool AdBlockFirstPartyAllowed(const std::string& first_party_host) {
+  if (first_party_host.empty()) {
+    return false;
+  }
+  AdAllowlist& allowlist = Allowlist();
+  base::AutoLock scoped(allowlist.lock);
+  if (!allowlist.loaded) {
+    LoadAllowlistFromDefaultsLocked(allowlist);
+  }
+  return allowlist.hosts.count(NormalizeHost(first_party_host)) > 0;
+}
+
 bool AdBlockShouldBlock(const GURL& url) {
   if (!url.SchemeIsHTTPOrHTTPS()) {
     return false;
@@ -271,14 +343,18 @@ bool AdBlockShouldBlock(const GURL& url) {
 }
 
 void MaybeProxyAdblock(network::URLLoaderFactoryBuilder& factory_builder,
-                       bool is_subresource) {
+                       bool is_subresource,
+                       const std::string& first_party_host) {
   if (!is_subresource || !AdBlockEnabled()) {
     return;
   }
   if (!AdHostSet::Get().loaded()) {
     return;  // list failed to load — don't interpose a useless proxy.
   }
-  MoriAdblockURLLoaderFactory::Install(factory_builder);
+  // Install even for allowlisted sites: the allowlist is consulted per-request
+  // so removing a site from it takes effect on reload without waiting for a
+  // fresh factory (worker factories outlive documents).
+  MoriAdblockURLLoaderFactory::Install(factory_builder, first_party_host);
 }
 
 }  // namespace mori

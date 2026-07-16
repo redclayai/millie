@@ -154,10 +154,12 @@ struct ExtensionsMenu: View {
 
     @ObservedObject private var extensions = ExtensionStore.shared
     @ObservedObject private var settings = BrowserSettings.shared
+    @ObservedObject private var adBlock = AdBlockStore.shared
     @Environment(\.palette) private var p
 
     @State private var devMode = false
     @State private var siteBlocked = false
+    @State private var adsAllowed = false
 
     // The active page as a web URL (nil on chrome:// / start pages).
     private var siteURL: String? {
@@ -188,6 +190,7 @@ struct ExtensionsMenu: View {
             extensions.refresh()
             devMode = MoriChromeExtensions.developerMode()
             if let s = siteURL { siteBlocked = extensions.areExtensionsBlocked(onSite: s) }
+            if let h = siteHost { adsAllowed = AdBlockStore.shared.isAllowed(host: h) }
         }
     }
 
@@ -252,6 +255,14 @@ struct ExtensionsMenu: View {
                    value: settings.autoPiP ? "Allowed" : "Off",
                    on: settings.autoPiP) {
             settings.autoPiP.toggle()
+        }
+        settingRow(icon: "shield.fill",
+                   title: "Block Ads",
+                   value: settings.blockAds
+                       ? "\(adBlock.blockedThisSession) blocked this session"
+                       : "Off",
+                   on: settings.blockAds) {
+            settings.blockAds.toggle()
         }
     }
 
@@ -336,6 +347,15 @@ struct ExtensionsMenu: View {
                         extensions.setExtensionsBlocked(v, onSite: s)
                         store.reload()
                     }))
+                if settings.blockAds, let host = siteHost {
+                    Toggle("Don't block ads on this site", isOn: Binding(
+                        get: { adsAllowed },
+                        set: { v in
+                            adsAllowed = v
+                            AdBlockStore.shared.setAllowed(v, host: host)
+                            store.reload()
+                        }))
+                }
                 Button("All Site Settings…") { openSiteSettings(); dismiss() }
             }
         } label: {

@@ -12,18 +12,22 @@
  #include "chrome/common/chrome_version.h"
  #include "components/enterprise/platform_auth/platform_auth_features.h"
  #include "components/soda/constants.h"
-@@ -6715,6 +6716,16 @@
+@@ -6715,6 +6716,20 @@
        frame, type == URLLoaderFactoryType::kNavigation, request_initiator,
        isolation_info, factory_builder);
  
 +#if BUILDFLAG(IS_MAC)
 +  // Millie built-in ad/tracker blocker: proxy subresource factories so ad hosts
 +  // are cancelled before they hit the network. Self-gates on the "Block ads"
-+  // setting.
++  // setting; the top-frame host feeds the per-site "don't block ads on this
++  // site" allowlist.
 +  mori::MaybeProxyAdblock(
 +      factory_builder,
 +      type == URLLoaderFactoryType::kDocumentSubResource ||
-+          type == URLLoaderFactoryType::kWorkerSubResource);
++          type == URLLoaderFactoryType::kWorkerSubResource,
++      isolation_info.top_frame_origin()
++          ? isolation_info.top_frame_origin()->host()
++          : std::string());
 +#endif
 +
  #if BUILDFLAG(ENABLE_CAPTIVE_PORTAL_DETECTION)

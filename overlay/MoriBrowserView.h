@@ -166,6 +166,10 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 /// Set the process-wide built-in ad blocker state. Applies to future requests.
 + (void)setAdBlockerEnabled:(BOOL)enabled;
 
+/// Replace the ad blocker's per-site allowlist ("Don't block ads on this
+/// site") with the given hosts. Applies to future requests.
++ (void)setAdBlockerAllowedHosts:(NSArray<NSString *> *)hosts;
+
 /// Cancel an active Chromium-owned download by id.
 + (BOOL)cancelDownloadWithID:(uint32_t)downloadID;
 
