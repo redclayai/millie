@@ -699,23 +699,27 @@ final class BrowserStore: ObservableObject {
         // Pinned tabs are permanent: a close gesture (Cmd-W, close button) is
         // ignored. They can only be removed by explicitly unpinning them.
         if contexts.contains(where: { $0.pinnedTabIDs.contains(id) }), !allowPinned { return }
-        // Tabs inside a folder are a persistent collection (Zen/Arc-style).
+        // Tabs inside a USER folder are a persistent collection (Zen/Arc-style).
         // Closing KEEPS the entry: an awake tab unloads (sleeps, staying pinned
         // in the folder) on the first close; an already-asleep tab is removed
         // only by the × button (allowFolderRemoval) on a second press — Cmd-W
         // leaves it. `forceRemove` (the "Close Tab" menu item / bulk closes)
-        // removes it immediately regardless.
+        // removes it immediately regardless. Tidy groups are exempt: they're
+        // temporary, so closing one of their tabs just closes it.
         if !forceRemove,
-           contexts.contains(where: { $0.folders.contains { $0.tabIDs.contains(id) } }) {
-            let asleep = tab(for: id)?.isAsleep ?? false
-            if !asleep {
+           contexts.contains(where: { $0.folders.contains { !$0.isTidy && $0.tabIDs.contains(id) } }) {
+            // An unrealized tab (restored, never loaded) counts as already
+            // unloaded — sleep() is a no-op on it, so treating it as "awake"
+            // would loop in this branch forever and the × could never remove it.
+            let unloaded = tab(for: id).map { $0.isAsleep || !$0.hasRealized } ?? true
+            if !unloaded {
                 unloadFolderedTab(id)   // first close → keep pinned, just unload
                 return
             }
             if !allowFolderRemoval {
                 return                  // Cmd-W on an already-unloaded tab: keep it
             }
-            // asleep + × button → fall through to a real close (removes it)
+            // unloaded + × button → fall through to a real close (removes it)
         }
         let tab = tabs[idx]
         // Propagate this close to other devices (incognito tabs never sync).
@@ -748,6 +752,9 @@ final class BrowserStore: ObservableObject {
                 for folderIndex in contexts[contextIndex].folders.indices {
                     contexts[contextIndex].folders[folderIndex].tabIDs.removeAll { $0 == id }
                 }
+                // A tidy group is just its tabs — drop it once the last closes
+                // (user folders persist empty; they're deliberate collections).
+                contexts[contextIndex].folders.removeAll { $0.isTidy && $0.tabIDs.isEmpty }
                 if contexts[contextIndex].selectedTabID == id {
                     contexts[contextIndex].selectedTabID = nil
                 }
@@ -1275,6 +1282,66 @@ final class BrowserStore: ObservableObject {
     func deleteFolder(_ folderID: TabFolder.ID) {
         withAnimation(Motion.snappy) {
             folders.removeAll { $0.id == folderID }
+        }
+        scheduleSessionSave()
+    }
+
+    /// Dissolve a folder: the folder disappears, its tabs stay open and fall
+    /// back to the loose list (Dia's "Separate Tabs").
+    func separateFolderTabs(_ folderID: TabFolder.ID) {
+        deleteFolder(folderID)
+        ToastCenter.shared.show("Tabs separated", icon: "folder.badge.minus", style: .success)
+    }
+
+    /// Close a folder AND all of its tabs.
+    func closeFolderAndTabs(_ folderID: TabFolder.ID) {
+        guard let folder = folders.first(where: { $0.id == folderID }) else { return }
+        for id in folder.tabIDs { closeTab(id, forceRemove: true) }
+        deleteFolder(folderID)
+    }
+
+    /// Duplicate a folder: fresh tabs for each member (same URLs), collected in
+    /// a new folder right after the original.
+    func duplicateFolder(_ folderID: TabFolder.ID) {
+        guard let ctxIdx = contexts.firstIndex(where: { $0.folders.contains { $0.id == folderID } }),
+              let folder = contexts[ctxIdx].folders.first(where: { $0.id == folderID })
+        else { return }
+        let copies = folder.tabIDs.compactMap { duplicateTab($0, select: false)?.id }
+        guard !copies.isEmpty else { return }
+        let copyFolder = TabFolder(name: folder.name + " copy", symbol: folder.symbol,
+                                   isExpanded: true, tabIDs: copies,
+                                   isTidy: folder.isTidy, colorHex: folder.colorHex)
+        if let pos = contexts[ctxIdx].folders.firstIndex(where: { $0.id == folderID }) {
+            contexts[ctxIdx].folders.insert(copyFolder, at: pos + 1)
+        } else {
+            contexts[ctxIdx].folders.append(copyFolder)
+        }
+        scheduleSessionSave()
+    }
+
+    /// Copy every tab in the folder as a Markdown link list.
+    func copyFolderLinksAsMarkdown(_ folderID: TabFolder.ID) {
+        guard let folder = folders.first(where: { $0.id == folderID }) else { return }
+        let lines = folder.tabIDs.compactMap { id -> String? in
+            guard let t = tab(for: id), !t.urlString.isEmpty else { return nil }
+            let title = t.displayTitle.isEmpty ? t.urlString : t.displayTitle
+            return "- [\(title)](\(t.urlString))"
+        }
+        guard !lines.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(lines.joined(separator: "\n"), forType: .string)
+        ToastCenter.shared.show("\(lines.count) link\(lines.count == 1 ? "" : "s") copied",
+                                icon: "doc.on.doc", style: .success)
+    }
+
+    /// Set (or clear, with nil = derive from the first tab's favicon) a
+    /// folder's accent color.
+    func setFolderColor(_ folderID: TabFolder.ID, hex: String?) {
+        for ci in contexts.indices {
+            if let fi = contexts[ci].folders.firstIndex(where: { $0.id == folderID }) {
+                contexts[ci].folders[fi].colorHex = hex
+            }
         }
         scheduleSessionSave()
     }

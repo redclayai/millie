@@ -68,6 +68,14 @@ struct Sidebar: View {
                         if store.folders.contains(where: { !$0.isTidy }) {
                             FolderSection(store: store, draggingTabID: $draggingTabID)
                                 .padding(rowInsets(8))
+                            // While a drag is up, an explicit "leave the folders"
+                            // target: dropping here places the tab loose (top of
+                            // the list) — the visible way to un-folder by drag.
+                            if draggingTabID != nil {
+                                UnfolderDropZone(store: store,
+                                                 draggingTabID: $draggingTabID)
+                                    .padding(rowInsets(8))
+                            }
                             SidebarSeparator()
                                 .padding(rowInsets(8))
                         }
@@ -512,6 +520,8 @@ private struct FolderRow: View {
     @Binding var draggingTabID: BrowserTab.ID?
 
     @Environment(\.palette) private var p
+    @Environment(\.colorScheme) private var scheme
+    @ObservedObject private var settings = BrowserSettings.shared
     @State private var hovering = false
     @State private var headerDropTargeted = false
     @State private var isEditing = false
@@ -535,6 +545,36 @@ private struct FolderRow: View {
             ?? childTabs.first
     }
 
+    /// The folder's accent: the user-picked color, else the dominant color of
+    /// the representative tab's favicon, else nil (default chrome colors).
+    /// Restored/unrealized tabs have no live `faviconImage`, so fall back to the
+    /// persistent favicon cache (memory + disk, keyed by host) — that's what
+    /// keeps Jira blue / Grafana orange across restarts.
+    private var folderTint: Color? {
+        if folder.colorHex == TabFolder.noColor { return nil }
+        if let hex = folder.colorHex { return TokenColor(hex: hex).color }
+        let image = representativeTab?.faviconImage
+            ?? FaviconCache.shared.cached(
+                host: SiteBrand.host(from: representativeTab?.urlString))
+        if let image, let dominant = FaviconDominantColor.color(for: image) {
+            return Color(nsColor: dominant)
+        }
+        return nil
+    }
+
+    /// The card wash is off when the user disabled it globally (Settings) or
+    /// chose "No Color" for this folder.
+    private var showsCard: Bool {
+        settings.tintedFolderCards && folder.colorHex != TabFolder.noColor
+    }
+
+    /// The palette offered in the folder's Color menu (mirrors Dia's row).
+    static let colorChoices: [(name: String, hex: String)] = [
+        ("Black", "#1C1C1E"), ("Green", "#34A853"), ("Blue", "#3E6AE1"),
+        ("Purple", "#6E56CF"), ("Yellow", "#EAB308"), ("Pink", "#EC4899"),
+        ("Red", "#EF4444"), ("Orange", "#F97316"),
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             // Folder header row.
@@ -544,7 +584,7 @@ private struct FolderRow: View {
                     // icon) — this is a temporary auto-group, a different
                     // feature from folders. No icon picker.
                     Icon(name: "rectangle.3.group", size: 15)
-                        .foregroundStyle(p.mutedForeground.color)
+                        .foregroundStyle(folderTint ?? p.mutedForeground.color)
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 } else {
@@ -556,9 +596,9 @@ private struct FolderRow: View {
                         faviconPage: representativeTab?.urlString,
                         faviconImage: representativeTab?.faviconImage,
                         size: 24,
-                        frontColor: p.primary.color.opacity(0.18),
-                        backColor: p.primary.color.opacity(0.32),
-                        stroke: p.sidebarForeground.color.opacity(0.55),
+                        frontColor: (folderTint ?? p.primary.color).opacity(folderTint == nil ? 0.18 : 0.30),
+                        backColor: (folderTint ?? p.primary.color).opacity(folderTint == nil ? 0.32 : 0.55),
+                        stroke: (folderTint ?? p.sidebarForeground.color).opacity(0.55),
                         glyphColor: p.sidebarForeground.color.opacity(0.85),
                         surface: p.sidebar.color
                     )
@@ -604,13 +644,53 @@ private struct FolderRow: View {
             .onHover { hovering = $0 }
             .contextMenu {
                 Button("Rename") { beginRename() }
-                Button("Change Icon…") { showIconPicker = true }
+                if !folder.isTidy {
+                    Button("Change Icon…") { showIconPicker = true }
+                }
+                Menu("Color") {
+                    Button {
+                        store.setFolderColor(folder.id, hex: nil)
+                    } label: {
+                        if folder.colorHex == nil {
+                            Label("From Tab Icon", systemImage: "checkmark")
+                        } else {
+                            Text("From Tab Icon")
+                        }
+                    }
+                    Button {
+                        store.setFolderColor(folder.id, hex: TabFolder.noColor)
+                    } label: {
+                        if folder.colorHex == TabFolder.noColor {
+                            Label("No Color", systemImage: "checkmark")
+                        } else {
+                            Text("No Color")
+                        }
+                    }
+                    Divider()
+                    ForEach(FolderRow.colorChoices, id: \.hex) { choice in
+                        Button {
+                            store.setFolderColor(folder.id, hex: choice.hex)
+                        } label: {
+                            if folder.colorHex == choice.hex {
+                                Label(choice.name, systemImage: "checkmark")
+                            } else {
+                                Text(choice.name)
+                            }
+                        }
+                    }
+                }
                 Button("New Tab in Folder") {
                     let tab = store.newTab()
                     store.addTab(tab.id, toFolder: folder.id)
                 }
                 Divider()
-                Button("Delete Folder", role: .destructive) { store.deleteFolder(folder.id) }
+                Button("Separate Tabs") { store.separateFolderTabs(folder.id) }
+                Button("Duplicate") { store.duplicateFolder(folder.id) }
+                Button("Copy All Links as Markdown") { store.copyFolderLinksAsMarkdown(folder.id) }
+                Divider()
+                Button("Close Folder & Tabs", role: .destructive) {
+                    store.closeFolderAndTabs(folder.id)
+                }
             }
             // Dropping onto the header appends the tab and expands the folder.
             .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
@@ -659,11 +739,23 @@ private struct FolderRow: View {
                 }
             }
         }
+        // Dia-style group card: the whole block (header + tabs) sits on a wash
+        // of the folder's accent color — favicon-derived by default, or the
+        // user's pick from the Color menu.
+        .padding(6)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.lg + 2, style: .continuous)
+                .fill(showsCard ? (folderTint ?? p.primary.color).opacity(cardOpacity)
+                                : .clear)
+        )
         .onAppear(perform: beginRenameIfRequested)
         .onChange(of: store.folderIDPendingRename) { _, _ in
             beginRenameIfRequested()
         }
     }
+
+    /// Subtle in light mode, a touch stronger in dark so the wash still reads.
+    private var cardOpacity: Double { scheme == .dark ? 0.24 : 0.16 }
 
     private func beginRenameIfRequested() {
         guard store.folderIDPendingRename == folder.id else { return }
@@ -742,6 +834,79 @@ private struct LooseTabList: View {
                     store: store,
                     isTargeted: $appendDropTargeted))
         }
+    }
+}
+
+/// Shown only while a tab drag is in flight: dropping here pulls the tab out
+/// of any folder and places it at the top of the loose list. The visible
+/// "drag to a non-folder" affordance.
+private struct UnfolderDropZone: View {
+    @ObservedObject var store: BrowserStore
+    @Binding var draggingTabID: BrowserTab.ID?
+
+    @Environment(\.palette) private var p
+    @State private var targeted = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+            .strokeBorder(p.mutedForeground.color.opacity(targeted ? 0.9 : 0.35),
+                          style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            .background(
+                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                    .fill(targeted ? p.sidebarForeground.color.opacity(0.08) : .clear))
+            .overlay(
+                Text("Drop here to remove from folder")
+                    .font(Typography.ui(Typography.small))
+                    .foregroundStyle(p.mutedForeground.color))
+            .frame(height: 26)
+            .contentShape(Rectangle())
+            .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
+                target: .loose(index: 0),
+                draggingID: $draggingTabID,
+                store: store,
+                isTargeted: $targeted,
+                moveOnEnter: false))
+    }
+}
+
+/// Dominant color of a favicon: average of its saturated, opaque pixels over a
+/// small downsample (cached per NSImage — favicons are immutable once decoded).
+enum FaviconDominantColor {
+    private static let cache = NSCache<NSImage, NSColor>()
+
+    static func color(for image: NSImage) -> NSColor? {
+        if let hit = cache.object(forKey: image) { return hit }
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        let side = 12
+        guard let ctx = CGContext(data: nil, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: side * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.interpolationQuality = .low
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let data = ctx.data else { return nil }
+        let px = data.bindMemory(to: UInt8.self, capacity: side * side * 4)
+
+        var r = 0.0, g = 0.0, b = 0.0, n = 0.0
+        for i in 0..<(side * side) {
+            let a = Double(px[i * 4 + 3]) / 255
+            guard a > 0.5 else { continue }
+            let pr = Double(px[i * 4]) / 255, pg = Double(px[i * 4 + 1]) / 255,
+                pb = Double(px[i * 4 + 2]) / 255
+            // Skip near-greys/whites/blacks so the brand hue dominates.
+            let mx = max(pr, pg, pb), mn = min(pr, pg, pb)
+            guard mx - mn > 0.12, mx > 0.15, mn < 0.95 else { continue }
+            // Weight by saturation so vivid pixels drive the result.
+            let w = mx - mn
+            r += pr * w; g += pg * w; b += pb * w; n += w
+        }
+        guard n > 0 else { return nil }
+        let color = NSColor(srgbRed: r / n, green: g / n, blue: b / n, alpha: 1)
+        cache.setObject(color, forKey: image)
+        return color
     }
 }
 
@@ -885,8 +1050,61 @@ struct TabMenu: View {
 private struct SidebarBottomBar: View {
     @ObservedObject var store: BrowserStore
     @ObservedObject private var settings = BrowserSettings.shared
+    @ObservedObject private var updates = UpdateNotifier.shared
+    @Environment(\.palette) private var pal
 
     var body: some View {
+        VStack(spacing: 6) {
+            if let version = updates.availableVersion {
+                updateBanner(version)
+                    .padding(.horizontal, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            bar
+        }
+        .animation(Motion.reveal, value: updates.availableVersion)
+        .onAppear { updates.start() }
+    }
+
+    /// "Millie X.Y is ready" — clicking hands off to Sparkle's update flow.
+    private func updateBanner(_ version: String) -> some View {
+        HStack(spacing: 8) {
+            Icon(name: "arrow.down.circle.fill", size: 14)
+                .foregroundStyle(pal.primary.color)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Millie \(version) is available")
+                    .font(Typography.ui(Typography.base, weight: .semibold))
+                    .foregroundStyle(pal.foreground.color)
+                Text("Click to update")
+                    .font(Typography.ui(Typography.small))
+                    .foregroundStyle(pal.mutedForeground.color)
+            }
+            Spacer(minLength: 4)
+            Button {
+                updates.dismiss()
+            } label: {
+                Icon(name: "xmark", size: 10, weight: .bold)
+                    .foregroundStyle(pal.mutedForeground.color)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss until the next release")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                .fill(pal.primary.color.opacity(0.14)))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                .strokeBorder(pal.primary.color.opacity(0.35), lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { MillieUpdater.shared.checkForUpdates() }
+        .help("Download and install Millie \(version)")
+    }
+
+    private var bar: some View {
         HStack(spacing: 6) {
             if settings.aiIntegrationEnabled {
                 IconButton(systemName: "glyph-millie",

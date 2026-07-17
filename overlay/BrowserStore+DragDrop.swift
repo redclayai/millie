@@ -140,7 +140,9 @@ struct TabReorderDropDelegate: DropDelegate {
             if splitHover?.wrappedValue == splitTargetID { splitHover?.wrappedValue = nil }
             // Left the center band → resume live reordering.
             if moveOnEnter {
-                resolveDraggedTabID(from: info) { move($0, clearingDragState: false) }
+                resolveDraggedTabID(from: info) {
+                    move($0, clearingDragState: false, allowContainerChange: false)
+                }
             }
         }
         return DropProposal(operation: .move)
@@ -154,8 +156,12 @@ struct TabReorderDropDelegate: DropDelegate {
             return
         }
         guard moveOnEnter else { return }
+        // Hover only reorders WITHIN the tab's current container. Moving it to a
+        // different container (loose → pinned, loose → folder, …) happens only on
+        // release — otherwise a folder sitting on the way to the pinned grid
+        // steals the tab as the drag passes over it.
         resolveDraggedTabID(from: info) { id in
-            move(id, clearingDragState: false)
+            move(id, clearingDragState: false, allowContainerChange: false)
         }
     }
 
@@ -206,13 +212,17 @@ struct TabReorderDropDelegate: DropDelegate {
         }
     }
 
-    private func move(_ id: BrowserTab.ID?, clearingDragState: Bool) {
+    private func move(_ id: BrowserTab.ID?, clearingDragState: Bool,
+                      allowContainerChange: Bool = true) {
         defer {
             if clearingDragState { draggingID = nil }
             if clearingDragState { isTargeted?.wrappedValue = false }
         }
 
         guard let id else { return }
+        if !allowContainerChange, !store.isInContainer(id, of: target) {
+            return
+        }
         if !store.isAlready(id, at: target) {
             store.moveTab(id, to: target)
         }
@@ -220,6 +230,20 @@ struct TabReorderDropDelegate: DropDelegate {
 }
 
 extension BrowserStore {
+    /// True if `id` already lives in `target`'s container (the pinned grid, the
+    /// same folder, or the loose list) — i.e. a move there is a reorder, not a
+    /// container change. Hover-moves are restricted to this case.
+    func isInContainer(_ id: BrowserTab.ID, of target: TabDropTarget) -> Bool {
+        switch target {
+        case .pinned:
+            return pinnedTabIDs.contains(id)
+        case .folder(let fid, _):
+            return folders.first(where: { $0.id == fid })?.tabIDs.contains(id) ?? false
+        case .loose:
+            return looseTabs.contains { $0.id == id }
+        }
+    }
+
     /// True if `id` already occupies `target`, so a hover move would be a no-op
     /// (avoids churn / flicker during live reordering).
     func isAlready(_ id: BrowserTab.ID, at target: TabDropTarget) -> Bool {
