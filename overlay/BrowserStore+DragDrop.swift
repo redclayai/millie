@@ -16,7 +16,8 @@ enum TabDropTarget: Equatable {
     case pinned(index: Int)
     /// Insert into the given folder at this index (`Int.max` appends).
     case folder(id: TabFolder.ID, index: Int)
-    /// Place at this position among the loose (unfiled) tabs.
+    /// Place at this position in the mixed ROOT list (`rootOrder` entry index —
+    /// tabs and folders share one list, so a tab can land between folders).
     case loose(index: Int)
 }
 
@@ -36,7 +37,7 @@ extension BrowserStore {
         let sourceFolderIndex = folders.firstIndex { $0.tabIDs.contains(id) }
         let sourceFolderID = sourceFolderIndex.map { folders[$0].id }
         let sourceFolderTabIndex = sourceFolderIndex.flatMap { folders[$0].tabIDs.firstIndex(of: id) }
-        let sourceLooseIndex = looseTabs.map(\.id).firstIndex(of: id)
+        // (Root-list source position is derived inside the .loose branch.)
 
         withAnimation(Motion.snappy) {
             // 1. Detach from the current container.
@@ -66,34 +67,22 @@ extension BrowserStore {
 
             case .loose(let index):
                 // The tab is now loose (removed from pinned/folders above).
-                // Rebuild the desired loose order, then weave it back into the
-                // active context's member list, leaving pinned/foldered slots
-                // untouched.
-                var looseIDs = looseTabs.map(\.id).filter { $0 != id }
-                let adjusted = adjustedInsertionIndex(index, movingFrom: sourceLooseIndex)
-                let clamped = min(max(adjusted, 0), looseIDs.count)
-                looseIDs.insert(id, at: clamped)
-
-                var context = activeContext
-                let looseSet = Set(looseIDs)
-                var queue = looseIDs
-                var rebuilt: [BrowserTab.ID] = []
-                for memberID in context.tabIDs where memberID != id {
-                    if looseSet.contains(memberID) {
-                        if let nid = queue.first {
-                            rebuilt.append(nid)
-                            queue.removeFirst()
-                        }
-                    } else {
-                        rebuilt.append(memberID)
-                    }
-                }
-                // One desired entry is always left over (the walk skips the
-                // dragged tab's old slot). Appending keeps the *loose* order —
-                // the filtered sequence — exactly as desired.
-                rebuilt.append(contentsOf: queue)
-                context.tabIDs = rebuilt
-                activeContext = context
+                // Place it at the requested position in the MIXED root list —
+                // tabs and folders share this order, so a tab can sit between
+                // two folders.
+                var entries = healedRootEntries(for: activeContext)
+                let sourceIndex = entries.firstIndex(of: .tab(id))
+                entries.removeAll { $0 == .tab(id) }
+                let adjusted = adjustedInsertionIndex(index, movingFrom: sourceIndex)
+                let clamped = min(max(adjusted, 0), entries.count)
+                entries.insert(.tab(id), at: clamped)
+                contexts[activeContextIndex].rootOrder = entries
+            }
+            // Pinning/foldering removes the tab from the root list; healing the
+            // stored order here keeps it canonical for the next reads.
+            if case .loose = target {} else {
+                contexts[activeContextIndex].rootOrder =
+                    healedRootEntries(for: activeContext)
             }
             syncChromePinnedState(for: id)
             scheduleSessionSave()
@@ -258,10 +247,10 @@ extension BrowserStore {
             let adjusted = adjustedInsertionIndex(index, movingFrom: current)
             return current == clampedIndex(adjusted, count: max(folder.tabIDs.count - 1, 0))
         case .loose(let index):
-            let ids = looseTabs.map(\.id)
-            guard let current = ids.firstIndex(of: id) else { return false }
+            let entries = rootEntries
+            guard let current = entries.firstIndex(of: .tab(id)) else { return false }
             let adjusted = adjustedInsertionIndex(index, movingFrom: current)
-            return current == clampedIndex(adjusted, count: max(ids.count - 1, 0))
+            return current == clampedIndex(adjusted, count: max(entries.count - 1, 0))
         }
     }
 

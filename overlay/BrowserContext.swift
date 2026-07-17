@@ -8,6 +8,14 @@ import Foundation
 /// Tabs themselves live in the store's flat pool; a context references them by
 /// id, and every tab belongs to exactly one context. Stale ids are filtered on
 /// resolve, so a closed tab simply drops out.
+/// One item at the sidebar's root level: a loose tab or a folder. The root is
+/// a single mixed, reorderable list (Arc-style) — a tab can live between two
+/// folders.
+enum RootEntry: Codable, Equatable, Hashable {
+    case tab(UUID)
+    case folder(UUID)
+}
+
 struct BrowserContext: Identifiable, Equatable, Codable {
     let id: UUID
     var name: String
@@ -23,6 +31,10 @@ struct BrowserContext: Identifiable, Equatable, Codable {
     var pinnedTabIDs: [UUID]
     /// Collapsible folders grouping member tabs.
     var folders: [TabFolder]
+    /// Mixed root-level order: loose tabs and (non-tidy) folders in one list.
+    /// Self-healing — the store filters stale entries and appends missing ones
+    /// (empty = legacy session → folders first, then loose tabs).
+    var rootOrder: [RootEntry] = []
     /// The tab that was selected when this context was last active, restored
     /// on switch-back.
     var selectedTabID: UUID?
@@ -61,7 +73,7 @@ struct BrowserContext: Identifiable, Equatable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, symbol, theme, tabIDs, pinnedTabIDs, folders,
-             selectedTabID, profileID, isPrivate
+             selectedTabID, profileID, isPrivate, rootOrder
     }
 
     // Tolerant decode so sessions written before a field existed still load
@@ -79,6 +91,7 @@ struct BrowserContext: Identifiable, Equatable, Codable {
         selectedTabID = try c.decodeIfPresent(UUID.self, forKey: .selectedTabID)
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         isPrivate = try c.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
+        rootOrder = try c.decodeIfPresent([RootEntry].self, forKey: .rootOrder) ?? []
     }
 }
 

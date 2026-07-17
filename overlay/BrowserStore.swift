@@ -62,7 +62,8 @@ final class BrowserStore: ObservableObject {
     /// True while the sidebar shows the "Create a Context" flow instead of tabs.
     @Published var contextCreationVisible: Bool = false
 
-    private var activeContextIndex: Int {
+    // Internal (not private): BrowserStore+DragDrop writes rootOrder through it.
+    var activeContextIndex: Int {
         contexts.firstIndex { $0.id == activeContextID } ?? 0
     }
 
@@ -935,15 +936,26 @@ final class BrowserStore: ObservableObject {
         selectTab(ordered[index].id)
     }
 
-    /// Tab order used by the Cmd-1…Cmd-9 shortcuts: the active context's pinned
-    /// tabs first (matching the sidebar), then its remaining tabs in order.
+    /// Tab order used by the Cmd-1…Cmd-9 shortcuts: pinned tabs first, then the
+    /// root list in its visual order (folders contribute their members in
+    /// place), then tidy-group members — matching the sidebar top-to-bottom.
     private var orderedTabsForShortcuts: [BrowserTab] {
         let context = activeContext
-        let pinned = context.pinnedTabIDs.compactMap { tab(for: $0) }
-        let rest = context.tabIDs
-            .filter { !context.pinnedTabIDs.contains($0) }
-            .compactMap { tab(for: $0) }
-        return pinned + rest
+        var out = context.pinnedTabIDs.compactMap { tab(for: $0) }
+        for entry in healedRootEntries(for: context) {
+            switch entry {
+            case .tab(let t):
+                if let tab = tab(for: t) { out.append(tab) }
+            case .folder(let f):
+                if let folder = context.folders.first(where: { $0.id == f }) {
+                    out.append(contentsOf: folder.tabIDs.compactMap { tab(for: $0) })
+                }
+            }
+        }
+        for folder in context.folders where folder.isTidy {
+            out.append(contentsOf: folder.tabIDs.compactMap { tab(for: $0) })
+        }
+        return out
     }
 
     /// Cycle to the next/previous tab in the active context, wrapping around.
@@ -1163,6 +1175,43 @@ final class BrowserStore: ObservableObject {
         Set(folders.flatMap { $0.tabIDs })
     }
 
+    // MARK: Root-level order (mixed tabs + folders, Arc-style)
+
+    /// The active context's root list, healed (see `healedRootEntries`).
+    var rootEntries: [RootEntry] {
+        guard contexts.indices.contains(activeContextIndex) else { return [] }
+        return healedRootEntries(for: contexts[activeContextIndex])
+    }
+
+    /// A context's stored `rootOrder` reconciled with reality: stale entries
+    /// (closed tabs, deleted/tidy folders, tabs that got pinned or foldered)
+    /// drop out; missing ones append — non-tidy folders first, then loose tabs
+    /// in member order, which makes an EMPTY stored order (legacy session)
+    /// reproduce the old folders-above-tabs layout exactly.
+    func healedRootEntries(for context: BrowserContext) -> [RootEntry] {
+        let foldered = Set(context.folders.flatMap { $0.tabIDs })
+        let looseIDs = context.tabIDs.filter {
+            !context.pinnedTabIDs.contains($0) && !foldered.contains($0)
+        }
+        let looseSet = Set(looseIDs)
+        let folderIDs = context.folders.filter { !$0.isTidy }.map(\.id)
+        let folderSet = Set(folderIDs)
+
+        var out: [RootEntry] = []
+        var seenTabs = Set<UUID>(), seenFolders = Set<UUID>()
+        for entry in context.rootOrder {
+            switch entry {
+            case .tab(let t):
+                if looseSet.contains(t), seenTabs.insert(t).inserted { out.append(entry) }
+            case .folder(let f):
+                if folderSet.contains(f), seenFolders.insert(f).inserted { out.append(entry) }
+            }
+        }
+        for f in folderIDs where !seenFolders.contains(f) { out.append(.folder(f)) }
+        for t in looseIDs where !seenTabs.contains(t) { out.append(.tab(t)) }
+        return out
+    }
+
     /// The active context's tabs that are neither pinned nor inside a folder,
     /// in the context's sidebar order.
     var looseTabs: [BrowserTab] {
@@ -1280,6 +1329,20 @@ final class BrowserStore: ObservableObject {
 
     /// Delete a folder; its tabs fall back into the loose list.
     func deleteFolder(_ folderID: TabFolder.ID) {
+        // Dissolve in place: the folder's root slot is replaced by its member
+        // tabs, so they stay exactly where the folder was in the mixed list.
+        if let ci = contexts.firstIndex(where: { $0.folders.contains { $0.id == folderID } }) {
+            var entries = healedRootEntries(for: contexts[ci])
+            if let pos = entries.firstIndex(of: .folder(folderID)),
+               let folder = contexts[ci].folders.first(where: { $0.id == folderID }) {
+                let freed = folder.tabIDs
+                    .filter { contexts[ci].tabIDs.contains($0)
+                        && !contexts[ci].pinnedTabIDs.contains($0) }
+                    .map { RootEntry.tab($0) }
+                entries.replaceSubrange(pos...pos, with: freed)
+            }
+            contexts[ci].rootOrder = entries
+        }
         withAnimation(Motion.snappy) {
             folders.removeAll { $0.id == folderID }
         }
