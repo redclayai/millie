@@ -84,6 +84,7 @@
 + (void)reopenClosedTab;
 + (void)focusOmnibox;
 + (void)closeCurrentTab;
++ (void)focusTabWithBrowserIdentifier:(int)identifier;
 + (BOOL)uiReady;
 + (void)goBack;
 + (void)goForward;
@@ -948,6 +949,31 @@ static void FlushPendingExternalUrls(int attempts_left) {
       [g_main_window makeKeyAndOrderFront:nil];
     }
   }
+}
+
+void OnBrowserActivateRequested(Browser* browser) {
+  if (!browser) {
+    return;
+  }
+  content::WebContents* active =
+      browser->tab_strip_model()
+          ? browser->tab_strip_model()->GetActiveWebContents()
+          : nullptr;
+  if (!active) {
+    return;
+  }
+  auto it = ViewMap().find(active);
+  if (it == ViewMap().end()) {
+    return;
+  }
+  MoriBrowserView* view = it->second;
+  if (!view) {
+    return;
+  }
+  int identifier = view.browserIdentifier;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [MoriRoot focusTabWithBrowserIdentifier:identifier];
+  });
 }
 
 bool HandleBrowserCommand(int command_id) {
@@ -1994,7 +2020,15 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
     return;
   }
   if (action === 'pipEnter') { pipEnter(true); return; }
-  if (action === 'pipExit') { pipExit(); return; }
+  if (action === 'pipExit') {
+    // Fired when the tab is brought back to the foreground. Returning to the
+    // tab resets the auto-PiP cycle: a dismissal (X or back-to-tab, both of
+    // which read as a non-programmatic leave) only suppresses re-popping while
+    // the user STAYS away — the next tab-away should PiP again.
+    window.__milliePipAutoOff = false;
+    pipExit();
+    return;
+  }
   const el = pick();
   if (!el) return;
   switch (action) {

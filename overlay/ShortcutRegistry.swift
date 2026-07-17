@@ -509,6 +509,9 @@ enum MoriCommands {
             MoriShortcut("sleepBackgroundTabs", modifiers: [.command, .control], key: "s") {
                 $0.sleepBackgroundTabs()
             },
+            MoriShortcut("togglePiP", modifiers: [.command, .option], key: "p") {
+                $0.media.togglePiP()
+            },
             MoriShortcut("copyCurrentURL", modifiers: [.command, .shift], key: "c") {
                 $0.copyCurrentTabURL()
             },

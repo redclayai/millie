@@ -252,6 +252,18 @@ final class MoriRoot: NSObject {
         if let id = shared?.store.selectedTabID { shared?.store.closeTab(id) }
     }
     @objc static func reopenClosedTab() { shared?.store.reopenClosedTab() }
+
+    /// Select the Millie tab hosting the engine browser with this identifier —
+    /// the landing half of PiP's "back to tab" (see OnBrowserActivateRequested).
+    @objc(focusTabWithBrowserIdentifier:)
+    static func focusTab(browserIdentifier: Int32) {
+        guard let store = shared?.store else { return }
+        guard let tab = store.tabs.first(where: {
+            $0.hasRealized && $0.browserView.browserIdentifier == browserIdentifier
+        }) else { return }
+        store.selectTab(tab.id)
+        NSApp.activate(ignoringOtherApps: true)
+    }
     @objc static func reload() { shared?.store.reload() }
     @objc static func forceReload() { shared?.store.reloadIgnoringCache() }
     @objc static func stop() { shared?.store.stop() }
