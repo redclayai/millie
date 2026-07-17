@@ -483,6 +483,16 @@ private struct FolderSection: View {
                 FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
             }
         }
+        // Root-level drop: anywhere in the folders region that ISN'T a folder
+        // header/row (the gaps between cards, the section padding) places the
+        // tab loose at the top of the root list — dragging into this area does
+        // not force the tab into a folder. Folder rows still take precedence.
+        .contentShape(Rectangle())
+        .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
+            target: .loose(index: 0),
+            draggingID: $draggingTabID,
+            store: store,
+            moveOnEnter: false))
     }
 }
 
@@ -514,6 +524,14 @@ private struct TidySection: View {
                 FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
             }
         }
+        // Root-level drop in the tidy region's gaps too (same rule as the
+        // folders section: only an explicit drop ON a group files the tab).
+        .contentShape(Rectangle())
+        .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
+            target: .loose(index: 0),
+            draggingID: $draggingTabID,
+            store: store,
+            moveOnEnter: false))
     }
 }
 
