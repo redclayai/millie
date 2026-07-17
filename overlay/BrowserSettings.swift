@@ -141,6 +141,12 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(tintedFolderCards, forKey: Key.tintedFolderCards) }
     }
 
+    /// Arc-style auto-Peek: links that would open a new tab, clicked in a
+    /// PINNED tab, open in the floating Peek overlay instead.
+    @Published var peekPinnedLinks: Bool {
+        didSet { defaults.set(peekPinnedLinks, forKey: Key.peekPinnedLinks) }
+    }
+
     /// Split view: the left pane's fraction of the width (0.2…0.8). Persisted so
     /// the user's preferred split ratio survives restarts and new splits.
     @Published var splitRatio: Double {
@@ -224,6 +230,7 @@ final class BrowserSettings: ObservableObject {
         static let autoSleepMinutes = "mori.autoSleepMinutes"
         static let splitRatio = "mori.splitRatio"
         static let tintedFolderCards = "mori.tintedFolderCards"
+        static let peekPinnedLinks = "mori.peekPinnedLinks"
         static let autoArchiveHours = "mori.autoArchiveHours"
         static let tabCycleOrder = "mori.tabCycleOrder"
     }
@@ -272,6 +279,7 @@ final class BrowserSettings: ObservableObject {
         autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 60
         splitRatio = defaults.object(forKey: Key.splitRatio) as? Double ?? 0.5
         tintedFolderCards = defaults.object(forKey: Key.tintedFolderCards) as? Bool ?? true
+        peekPinnedLinks = defaults.object(forKey: Key.peekPinnedLinks) as? Bool ?? true
         autoArchiveHours = defaults.object(forKey: Key.autoArchiveHours) as? Int ?? 24
         // Default to Arc/Dia behavior: Ctrl+Tab walks most-recently-used tabs.
         tabCycleOrder = TabCycleOrder(rawValue: defaults.string(forKey: Key.tabCycleOrder) ?? "")

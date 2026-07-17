@@ -8,18 +8,24 @@ extension BrowserStore {
     /// it to any space.
     func peek(url rawURL: String) {
         let resolved = URLInterpreter.resolve(rawURL, settings: settings)
-        if BrowserURLPolicy.isPrivilegedURL(resolved),
+        // about:blank is allowed: it's the initial commit of a window.open the
+        // Peek will adopt, with the real navigation following inside it.
+        let isBlank = resolved == "about:blank"
+        if !isBlank, BrowserURLPolicy.isPrivilegedURL(resolved),
            !confirmPrivilegedNavigation(resolved, source: "Peek") {
             ToastCenter.shared.show("Blocked internal URL", icon: "lock", style: .warning)
             return
         }
-        guard BrowserURLPolicy.isWebURL(resolved) || BrowserURLPolicy.isPrivilegedURL(resolved) else {
+        guard isBlank || BrowserURLPolicy.isWebURL(resolved)
+                || BrowserURLPolicy.isPrivilegedURL(resolved) else {
             ToastCenter.shared.show("Nothing to peek", icon: "eye", style: .warning)
             return
         }
         let target = MoriURLRewriter.rewrite(resolved)
         let tab = BrowserTab(url: target, title: "Peek")
-        tab.onRequestNewTab = { [weak self] u in self?.newTab(url: u) }
+        // New-tab links opened FROM a peek stay in the peek (Little Arc style):
+        // the overlay just shows the next page instead of spawning real tabs.
+        tab.onRequestNewTab = { [weak self] u in self?.peek(url: u) }
         tab.realize()
         tab.markAccessed()
         if let existing = peekTab { existing.close() }
@@ -52,14 +58,32 @@ extension BrowserStore {
         DispatchQueue.main.async { tab.close() }
     }
 
-    /// Promote the peeked page into a real tab in the active context.
+    /// Promote the peeked page into a real tab in the active context. Mount it
+    /// as a real tab FIRST, then clear the overlay — so the same web view hands
+    /// off to the tab strip with no unparented gap or teardown flash.
     func promotePeek() {
         guard let tab = peekTab else { return }
-        withAnimation(Motion.reveal) { peekTab = nil }
         tab.onMetadataChanged = { [weak self] _ in self?.scheduleSessionSave() }
         tabs.append(tab)
         addToActiveContext(tab.id)
         selectTab(tab.id)
+        peekTab = nil
+        scheduleSessionSave()
+    }
+
+    /// Promote the peeked page and open it in a split beside the tab that was
+    /// active when the Peek was raised.
+    func promotePeekToSplit() {
+        guard let tab = peekTab else { return }
+        let previous = selectedTabID
+        tab.onMetadataChanged = { [weak self] _ in self?.scheduleSessionSave() }
+        tabs.append(tab)
+        addToActiveContext(tab.id)
+        selectTab(tab.id)
+        if let previous, previous != tab.id {
+            splitWith(previous, side: .right)
+        }
+        peekTab = nil
         scheduleSessionSave()
     }
 }
@@ -95,82 +119,53 @@ private struct PeekCard: View {
 
     var body: some View {
         GeometryReader { geo in
-            let width = min(geo.size.width * 0.74, 1000)
-            let height = min(geo.size.height * 0.82, 820)
-            VStack(spacing: 0) {
-                header
-                Hairline().opacity(0.5)
-                PeekWebHost(tab: tab, cornerRadius: 0)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Arc-style: a large floating card that nearly fills the window,
+            // with a consistent margin. The controls sit ABOVE the card (not
+            // over the page) so they never collide with the site's own chrome.
+            let width = min(geo.size.width - 120, 1500)
+            let height = min(geo.size.height - 130, 1120)
+            VStack(alignment: .trailing, spacing: 8) {
+                controls
+                    .frame(width: width, alignment: .trailing)
+                PeekWebHost(tab: tab, cornerRadius: Radius.window)
+                    .frame(width: width, height: height)
+                    .background(
+                        RoundedRectangle(cornerRadius: Radius.window, style: .continuous)
+                            .fill(p.card.color))
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.window, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Radius.window, style: .continuous)
+                            .strokeBorder(p.border.color.opacity(0.7), lineWidth: 1))
+                    .elevation(.overlay, scheme)
             }
-            .frame(width: width, height: height)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.window, style: .continuous)
-                    .fill(p.card.color)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: Radius.window, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.window, style: .continuous)
-                    .strokeBorder(p.border.color.opacity(0.7), lineWidth: 1)
-            )
-            .elevation(.overlay, scheme)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 9) {
-            Favicon(icon: tab.faviconURL, page: tab.urlString,
-                    image: tab.faviconImage, size: 15)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(tab.title.isEmpty ? "Peek" : tab.title)
-                    .font(Typography.ui(Typography.base, weight: .medium))
-                    .foregroundStyle(p.foreground.color)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(prettyURL)
-                    .font(Typography.ui(Typography.small))
-                    .foregroundStyle(p.mutedForeground.color)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+    private var controls: some View {
+        HStack(spacing: 8) {
+            control("xmark", "Close (Esc)") { store.closePeek() }
+            control("arrow.up.left.and.arrow.down.right", "Open in Space (⌘↩)") {
+                store.promotePeek()
             }
-            Spacer(minLength: 8)
-
-            Button {
-                store.copyURL(of: tab.id)
-                ToastCenter.shared.show("Link copied", icon: "link", style: .success)
-            } label: {
-                Icon(name: "link", size: 14)
-                    .foregroundStyle(p.mutedForeground.color)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+            control("rectangle.split.2x1", "Open in Split View") {
+                store.promotePeekToSplit()
             }
-            .buttonStyle(.plain)
-            .help("Copy link")
-
-            Button { store.promotePeek() } label: {
-                Label("Open in Space", systemImage: "arrow.up.forward.app")
-                    .font(Typography.ui(Typography.base, weight: .medium))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-
-            Button { store.closePeek() } label: {
-                Icon(name: "xmark", size: 13, weight: .bold)
-                    .foregroundStyle(p.mutedForeground.color)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Close peek")
         }
-        .padding(.horizontal, 12)
-        .frame(height: 46)
     }
 
-    private var prettyURL: String {
-        guard let u = URL(string: tab.urlString) else { return tab.urlString }
-        return (u.host ?? "") + u.path
+    private func control(_ icon: String, _ help: String,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Icon(name: icon, size: 12, weight: .semibold)
+                .foregroundStyle(p.foreground.color)
+                .frame(width: 28, height: 28)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(p.border.color.opacity(0.5), lineWidth: 0.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 

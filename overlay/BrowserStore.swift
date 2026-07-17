@@ -474,8 +474,18 @@ final class BrowserStore: ObservableObject {
     private func makeTab(id: BrowserTab.ID = UUID(), url: String, title: String,
                          profileKey: String = "default") -> BrowserTab {
         let tab = BrowserTab(id: id, url: url, title: title, profileKey: profileKey)
-        tab.onRequestNewTab = { [weak self] url in
-            self?.newTab(url: url)
+        tab.onRequestNewTab = { [weak self, weak tab] url in
+            guard let self else { return }
+            // Arc-style auto-Peek: a link that would open a new tab, clicked in
+            // a PINNED tab, opens in the floating Peek overlay instead of
+            // cluttering the space (promote it from the Peek if it's a keeper).
+            if self.settings.peekPinnedLinks,
+               let source = tab, self.isPinned(source.id),
+               BrowserURLPolicy.isWebURL(URLInterpreter.resolve(url, settings: self.settings)) {
+                self.peek(url: url)
+            } else {
+                self.newTab(url: url)
+            }
         }
         tab.onMetadataChanged = { [weak self] _ in
             self?.scheduleSessionSave()

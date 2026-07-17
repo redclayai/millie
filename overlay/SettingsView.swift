@@ -323,6 +323,16 @@ struct SettingsView: View {
                         .foregroundStyle(p.mutedForeground.color)
                 }
             }
+            ToggleRow(isOn: $settings.peekPinnedLinks) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Peek links from pinned tabs")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text("Links that open a new tab preview in a floating Peek instead. Esc closes, ⌘↩ opens as a tab.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                }
+            }
 
             Hairline().opacity(0.5)
 

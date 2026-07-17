@@ -238,7 +238,22 @@ final class MoriRoot: NSObject {
     }
     @objc(openNewTabWithURL:)
     static func openNewTab(url: String) {
-        shared?.store.newTab(url: url.isEmpty ? "about:blank" : url, select: true)
+        guard let store = shared?.store else { return }
+        let target = url.isEmpty ? "about:blank" : url
+        // Arc-style auto-Peek: a link that opens a new tab (window.open /
+        // target=_blank) from a PINNED tab previews in the floating Peek
+        // instead of spawning a tab. window.open() commits about:blank first,
+        // then navigates — so the orphan surfaces as about:blank here; peek it
+        // anyway, and the Peek's view adopts that WebContents so the real
+        // navigation renders inside.
+        let resolved = URLInterpreter.resolve(target, settings: store.settings)
+        let peekable = resolved == "about:blank" || BrowserURLPolicy.isWebURL(resolved)
+        if store.settings.peekPinnedLinks,
+           let source = store.selectedTab, store.isPinned(source.id), peekable {
+            store.peek(url: target)
+            return
+        }
+        store.newTab(url: target, select: true)
     }
     /// True once the SwiftUI root (and its store) exists, so openNewTabWithURL:
     /// will actually create a tab. Used by the external-URL handler to defer

@@ -57,8 +57,10 @@ struct MoriShortcutTrigger {
 
     private static func normalizedSpecialAppKitKey(keyCode: UInt16) -> String? {
         switch keyCode {
+        case 36: return "return"
         case 48: return "tab"
         case 53: return "escape"
+        case 76: return "return"   // numpad enter
         case 116: return "pageup"
         case 121: return "pagedown"
         case 123: return "left"
@@ -409,6 +411,12 @@ enum MoriCommands {
                          key: "escape",
                          isEnabled: { store, _ in store.peekTab != nil }) {
                 $0.closePeek()
+            },
+            MoriShortcut("promotePeek",
+                         modifiers: .command,
+                         key: "return",
+                         isEnabled: { store, _ in store.peekTab != nil }) {
+                $0.promotePeek()
             },
             MoriShortcut("dismissWebContextMenu",
                          modifiers: [],
