@@ -55,6 +55,13 @@ Profile* ProfileForKey(const std::string& key);
 // tab, so the link appears to do nothing.
 bool OpenExternalUrls(const std::vector<GURL>& urls);
 
+// Chrome asked to activate `browser`'s window — most importantly fired by
+// Browser::ActivateContents when the Picture-in-Picture window's "back to tab"
+// button (or a page's window.focus()) targets a tab. Select the matching
+// Millie tab so the user actually lands on it; Chrome's own activation only
+// touches the invisible tab strip. Called from MoriBrowserWindow::Activate.
+void OnBrowserActivateRequested(Browser* browser);
+
 // Route a Chrome browser command (an IDC_* id) to the matching Millie action
 // for the File-menu commands that don't fit the non-Views/Spaces chrome — new
 // tab/window/incognito-window, reopen-closed-tab, open-location, close-tab.

@@ -65,20 +65,34 @@ struct Sidebar: View {
                                 .padding(rowInsets(8))
                         }
 
-                        // The root: ONE mixed, reorderable list of folders and
-                        // loose tabs (Arc-style) — a tab can live between two
-                        // folders. Insertion strips sit between every entry.
-                        RootList(store: store, draggingTabID: $draggingTabID)
-                            .padding(rowInsets(8))
+                        // The root is ONE mixed, reorderable list (a tab can
+                        // live between folders), rendered in two runs: the
+                        // folder region (through the last folder, including any
+                        // interleaved tabs) up top, and the trailing loose tabs
+                        // at the bottom — with TIDIED between them.
+                        let rootEntries = store.rootEntries
+                        let folderEnd = rootEntries.lastIndex(where: {
+                            if case .folder = $0 { return true }; return false
+                        }).map { $0 + 1 } ?? 0
 
-                        // Tidy groups stay their own temporary section, below
-                        // the root list.
-                        if store.folders.contains(where: { $0.isTidy }) {
+                        if folderEnd > 0 {
+                            RootList(store: store, draggingTabID: $draggingTabID,
+                                     range: 0..<folderEnd)
+                                .padding(rowInsets(8))
                             SidebarSeparator()
                                 .padding(rowInsets(8))
+                        }
+
+                        if store.folders.contains(where: { $0.isTidy }) {
                             TidySection(store: store, draggingTabID: $draggingTabID)
                                 .padding(rowInsets(8))
+                            SidebarSeparator()
+                                .padding(rowInsets(8))
                         }
+
+                        RootList(store: store, draggingTabID: $draggingTabID,
+                                 range: folderEnd..<rootEntries.count)
+                            .padding(rowInsets(8))
 
                         NewTabRow { store.presentLauncher() }
                             .onDrop(of: SidebarTabDrag.acceptedTypes,
@@ -467,14 +481,20 @@ private struct PinnedTile: View {
 private struct RootList: View {
     @ObservedObject var store: BrowserStore
     @Binding var draggingTabID: BrowserTab.ID?
+    /// Sub-range of root entries this instance renders (nil = all). The root
+    /// renders as two runs — the folder region and the trailing loose tabs —
+    /// with the TIDIED section between them; drop indexes stay global.
+    var range: Range<Int>? = nil
 
     @Environment(\.palette) private var p
     @State private var splitDropTargetID: BrowserTab.ID?
 
     var body: some View {
         let entries = store.rootEntries
+        let r = (range ?? 0..<entries.count).clamped(to: 0..<entries.count)
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(entries.enumerated()), id: \.element) { idx, entry in
+            ForEach(Array(entries[r].enumerated()), id: \.element) { offset, entry in
+                let idx = r.lowerBound + offset
                 RootDropStrip(index: idx, store: store, draggingTabID: $draggingTabID)
                 switch entry {
                 case .folder(let fid):
@@ -488,8 +508,8 @@ private struct RootList: View {
                     }
                 }
             }
-            RootDropStrip(index: entries.count, store: store,
-                          draggingTabID: $draggingTabID)
+            RootDropStrip(index: r.upperBound == entries.count ? Int.max : r.upperBound,
+                          store: store, draggingTabID: $draggingTabID)
         }
         .animation(Motion.snappy, value: draggingTabID != nil)
     }

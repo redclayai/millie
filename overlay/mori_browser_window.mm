@@ -776,6 +776,10 @@ bool MoriBrowserWindow::IsActive() const {
 
 void MoriBrowserWindow::Activate() {
   [MoriWindow() makeKeyAndOrderFront:nil];
+  // Chrome activates a browser to focus a specific tab (PiP "back to tab",
+  // window.focus()). Its own tab-strip activation is invisible in Millie —
+  // select the matching Millie tab so the user actually lands on it.
+  mori::OnBrowserActivateRequested(browser_);
 }
 
 gfx::NativeWindow MoriBrowserWindow::GetNativeWindow() const {
