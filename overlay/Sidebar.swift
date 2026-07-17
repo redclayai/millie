@@ -65,39 +65,28 @@ struct Sidebar: View {
                                 .padding(rowInsets(8))
                         }
 
-                        if store.folders.contains(where: { !$0.isTidy }) {
-                            FolderSection(store: store, draggingTabID: $draggingTabID)
-                                .padding(rowInsets(8))
-                            // While a drag is up, an explicit "leave the folders"
-                            // target: dropping here places the tab loose (top of
-                            // the list) — the visible way to un-folder by drag.
-                            if draggingTabID != nil {
-                                UnfolderDropZone(store: store,
-                                                 draggingTabID: $draggingTabID)
-                                    .padding(rowInsets(8))
-                            }
+                        // The root: ONE mixed, reorderable list of folders and
+                        // loose tabs (Arc-style) — a tab can live between two
+                        // folders. Insertion strips sit between every entry.
+                        RootList(store: store, draggingTabID: $draggingTabID)
+                            .padding(rowInsets(8))
+
+                        // Tidy groups stay their own temporary section, below
+                        // the root list.
+                        if store.folders.contains(where: { $0.isTidy }) {
                             SidebarSeparator()
                                 .padding(rowInsets(8))
-                        }
-
-                        // Tidy groups sit BELOW the folders line: temporary,
-                        // distinct from permanent folders.
-                        if store.folders.contains(where: { $0.isTidy }) {
                             TidySection(store: store, draggingTabID: $draggingTabID)
                                 .padding(rowInsets(8))
-                            SidebarSeparator()
-                                .padding(rowInsets(8))
                         }
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            NewTabRow { store.presentLauncher() }
-                                .onDrop(of: SidebarTabDrag.acceptedTypes,
-                                        delegate: TabReorderDropDelegate(
-                                            target: .loose(index: 0),
-                                            draggingID: $draggingTabID,
-                                            store: store))
-                            LooseTabList(store: store, draggingTabID: $draggingTabID)
-                        }
+                        NewTabRow { store.presentLauncher() }
+                            .onDrop(of: SidebarTabDrag.acceptedTypes,
+                                    delegate: TabReorderDropDelegate(
+                                        target: .loose(index: Int.max),
+                                        draggingID: $draggingTabID,
+                                        store: store,
+                                        moveOnEnter: false))
                             .padding(rowInsets(8))
                             .padding(.bottom, 10)
                     }
@@ -126,7 +115,7 @@ struct Sidebar: View {
         .contextMenu { SidebarContextMenu(store: store) }
         .onDrop(of: SidebarTabDrag.acceptedTypes,
                 delegate: TabReorderDropDelegate(
-                    target: .loose(index: store.looseTabs.count),
+                    target: .loose(index: Int.max),
                     draggingID: $draggingTabID,
                     store: store,
                     moveOnEnter: false))
@@ -471,32 +460,73 @@ private struct PinnedTile: View {
 
 // MARK: - Folders
 
-private struct FolderSection: View {
+/// The mixed root list: non-tidy folders and loose tabs in ONE ordered,
+/// reorderable list (`store.rootEntries`), with an always-mounted insertion
+/// strip between every entry. Dropping a tab on a strip places it loose at
+/// exactly that position — including between two folders.
+private struct RootList: View {
     @ObservedObject var store: BrowserStore
     @Binding var draggingTabID: BrowserTab.ID?
 
+    @Environment(\.palette) private var p
+    @State private var splitDropTargetID: BrowserTab.ID?
+
     var body: some View {
-        // The gaps between group cards are the root-level drop targets, but at
-        // rest they're only 2pt — unhittable. While a drag is up they widen
-        // into real targets (animated), then collapse back.
-        VStack(alignment: .leading, spacing: draggingTabID != nil ? 16 : 2) {
-            // Permanent, user-made folders only. Tidy groups render separately
-            // in TidySection, below the folders separator.
-            ForEach(store.folders.filter { !$0.isTidy }) { folder in
-                FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
+        let entries = store.rootEntries
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(entries.enumerated()), id: \.element) { idx, entry in
+                RootDropStrip(index: idx, store: store, draggingTabID: $draggingTabID)
+                switch entry {
+                case .folder(let fid):
+                    if let folder = store.folders.first(where: { $0.id == fid }) {
+                        FolderRow(store: store, folder: folder,
+                                  draggingTabID: $draggingTabID)
+                    }
+                case .tab(let tid):
+                    if let tab = store.tab(for: tid) {
+                        rootTabRow(tab, index: idx)
+                    }
+                }
             }
+            RootDropStrip(index: entries.count, store: store,
+                          draggingTabID: $draggingTabID)
         }
         .animation(Motion.snappy, value: draggingTabID != nil)
-        // Root-level drop: anywhere in the folders region that ISN'T a folder
-        // header/row (the gaps between cards, the section padding) places the
-        // tab loose at the top of the root list — dragging into this area does
-        // not force the tab into a folder. Folder rows still take precedence.
-        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func rootTabRow(_ tab: BrowserTab, index: Int) -> some View {
+        TabRow(
+            tab: tab,
+            store: store,
+            isSelected: tab.id == store.selectedTabID,
+            onSelect: { store.selectTab(tab.id) },
+            onClose: { store.closeTab(tab.id) }
+        )
+        .transition(.tabClose)
+        .overlay {
+            if splitDropTargetID == tab.id {
+                RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
+                    .strokeBorder(p.primary.color, lineWidth: 2)
+            }
+        }
+        .contextMenu { TabMenu(store: store, tab: tab) }
+        .onDrag {
+            draggingTabID = tab.id
+            store.beginTearOffWatch(for: tab.id)
+            return SidebarTabDrag.provider(for: tab.id)
+        } preview: {
+            // Hide the cursor-following drag image: the live row already
+            // reorders in place, so a second floating copy under the pointer
+            // just reads as a confusing duplicate.
+            Color.clear.frame(width: 1, height: 1)
+        }
         .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
-            target: .loose(index: 0),
+            target: .loose(index: index),
             draggingID: $draggingTabID,
             store: store,
-            moveOnEnter: false))
+            splitTargetID: tab.id,
+            splitHover: $splitDropTargetID))
     }
 }
 
@@ -509,9 +539,7 @@ private struct TidySection: View {
     @Environment(\.palette) private var p
 
     var body: some View {
-        // Same widening-gap trick as FolderSection: droppable root-level gaps
-        // between tidy cards while a drag is in flight.
-        VStack(alignment: .leading, spacing: draggingTabID != nil ? 16 : 2) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text("TIDIED")
                     .font(Typography.ui(Typography.caption, weight: .bold))
@@ -527,18 +555,50 @@ private struct TidySection: View {
             .padding(.horizontal, 9)
             .padding(.bottom, 2)
             ForEach(store.folders.filter { $0.isTidy }) { folder in
+                // Drops in the tidy region's gaps append to the END of the
+                // root list (the position visually nearest, just above).
+                RootDropStrip(index: Int.max, store: store,
+                              draggingTabID: $draggingTabID)
                 FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
             }
         }
         .animation(Motion.snappy, value: draggingTabID != nil)
-        // Root-level drop in the tidy region's gaps too (same rule as the
-        // folders section: only an explicit drop ON a group files the tab).
-        .contentShape(Rectangle())
-        .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
-            target: .loose(index: 0),
-            draggingID: $draggingTabID,
-            store: store,
-            moveOnEnter: false))
+    }
+}
+
+/// A slim drop target between group cards: dropping on it places the tab loose
+/// at root level (top of the tab list). ALWAYS MOUNTED — macOS registers drop
+/// destinations when a drag session STARTS, so a view inserted mid-drag never
+/// receives that session's drop (the bug behind three failed iterations of
+/// this feature). Idle: an invisible 4pt sliver. During a drag it expands into
+/// a visible strip and highlights under the cursor.
+private struct RootDropStrip: View {
+    /// Root-entry index this strip inserts at.
+    let index: Int
+    @ObservedObject var store: BrowserStore
+    @Binding var draggingTabID: BrowserTab.ID?
+
+    @Environment(\.palette) private var p
+    @State private var targeted = false
+
+    private var dragging: Bool { draggingTabID != nil }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Radius.sm, style: .continuous)
+            .fill(targeted ? p.primary.color.opacity(0.35)
+                           : p.mutedForeground.color.opacity(dragging ? 0.12 : 0))
+            .frame(height: dragging ? (targeted ? 12 : 6) : 4)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, dragging ? 3 : 0)
+            .contentShape(Rectangle())
+            .animation(Motion.snappy, value: targeted)
+            .animation(Motion.snappy, value: dragging)
+            .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
+                target: .loose(index: index),
+                draggingID: $draggingTabID,
+                store: store,
+                isTargeted: $targeted,
+                moveOnEnter: false))
     }
 }
 
@@ -802,98 +862,6 @@ private struct FolderRow: View {
         let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         store.renameFolder(folder.id, to: trimmed.isEmpty ? "Folder" : trimmed)
         isEditing = false
-    }
-}
-
-// MARK: - Loose tabs
-
-private struct LooseTabList: View {
-    @ObservedObject var store: BrowserStore
-    @Binding var draggingTabID: BrowserTab.ID?
-    @State private var appendDropTargeted = false
-    @State private var splitDropTargetID: BrowserTab.ID?
-    @Environment(\.palette) private var p
-
-    var body: some View {
-        LazyVStack(spacing: 4) {
-            ForEach(Array(store.looseTabs.enumerated()), id: \.element.id) { idx, tab in
-                TabRow(
-                    tab: tab,
-                    store: store,
-                    isSelected: tab.id == store.selectedTabID,
-                    onSelect: { store.selectTab(tab.id) },
-                    onClose: { store.closeTab(tab.id) }
-                )
-                .transition(.tabClose)
-                .overlay {
-                    if splitDropTargetID == tab.id {
-                        RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
-                            .strokeBorder(p.primary.color, lineWidth: 2)
-                    }
-                }
-                .contextMenu { TabMenu(store: store, tab: tab) }
-                .onDrag {
-                    draggingTabID = tab.id
-                    store.beginTearOffWatch(for: tab.id)
-                    return SidebarTabDrag.provider(for: tab.id)
-                } preview: {
-                    // Hide the cursor-following drag image: the live row already
-                    // reorders in place, so a second floating copy under the
-                    // pointer just reads as a confusing duplicate.
-                    Color.clear.frame(width: 1, height: 1)
-                }
-                .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
-                    target: .loose(index: idx),
-                    draggingID: $draggingTabID,
-                    store: store,
-                    splitTargetID: tab.id,
-                    splitHover: $splitDropTargetID))
-            }
-
-            // Catch zone: dropping in the empty area below the rows appends to
-            // the loose list. Min height gives an always-present target even
-            // when there are no loose tabs.
-            SidebarDropCatchZone(height: 24,
-                                 cornerRadius: Radius.sm,
-                                 isTargeted: appendDropTargeted)
-                .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
-                    target: .loose(index: store.looseTabs.count),
-                    draggingID: $draggingTabID,
-                    store: store,
-                    isTargeted: $appendDropTargeted))
-        }
-    }
-}
-
-/// Shown only while a tab drag is in flight: dropping here pulls the tab out
-/// of any folder and places it at the top of the loose list. The visible
-/// "drag to a non-folder" affordance.
-private struct UnfolderDropZone: View {
-    @ObservedObject var store: BrowserStore
-    @Binding var draggingTabID: BrowserTab.ID?
-
-    @Environment(\.palette) private var p
-    @State private var targeted = false
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
-            .strokeBorder(p.mutedForeground.color.opacity(targeted ? 0.9 : 0.35),
-                          style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            .background(
-                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
-                    .fill(targeted ? p.sidebarForeground.color.opacity(0.08) : .clear))
-            .overlay(
-                Text("Drop here to remove from folder")
-                    .font(Typography.ui(Typography.small))
-                    .foregroundStyle(p.mutedForeground.color))
-            .frame(height: 26)
-            .contentShape(Rectangle())
-            .onDrop(of: SidebarTabDrag.acceptedTypes, delegate: TabReorderDropDelegate(
-                target: .loose(index: 0),
-                draggingID: $draggingTabID,
-                store: store,
-                isTargeted: $targeted,
-                moveOnEnter: false))
     }
 }
 
