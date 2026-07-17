@@ -476,13 +476,17 @@ private struct FolderSection: View {
     @Binding var draggingTabID: BrowserTab.ID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        // The gaps between group cards are the root-level drop targets, but at
+        // rest they're only 2pt — unhittable. While a drag is up they widen
+        // into real targets (animated), then collapse back.
+        VStack(alignment: .leading, spacing: draggingTabID != nil ? 16 : 2) {
             // Permanent, user-made folders only. Tidy groups render separately
             // in TidySection, below the folders separator.
             ForEach(store.folders.filter { !$0.isTidy }) { folder in
                 FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
             }
         }
+        .animation(Motion.snappy, value: draggingTabID != nil)
         // Root-level drop: anywhere in the folders region that ISN'T a folder
         // header/row (the gaps between cards, the section padding) places the
         // tab loose at the top of the root list — dragging into this area does
@@ -505,7 +509,9 @@ private struct TidySection: View {
     @Environment(\.palette) private var p
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        // Same widening-gap trick as FolderSection: droppable root-level gaps
+        // between tidy cards while a drag is in flight.
+        VStack(alignment: .leading, spacing: draggingTabID != nil ? 16 : 2) {
             HStack(spacing: 6) {
                 Text("TIDIED")
                     .font(Typography.ui(Typography.caption, weight: .bold))
@@ -524,6 +530,7 @@ private struct TidySection: View {
                 FolderRow(store: store, folder: folder, draggingTabID: $draggingTabID)
             }
         }
+        .animation(Motion.snappy, value: draggingTabID != nil)
         // Root-level drop in the tidy region's gaps too (same rule as the
         // folders section: only an explicit drop ON a group files the tab).
         .contentShape(Rectangle())
