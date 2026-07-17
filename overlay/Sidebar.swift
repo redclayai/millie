@@ -246,6 +246,9 @@ private struct SidebarContextMenu: View {
         Button("Settings") {
             store.settingsVisible = true
         }
+        Button("Check for Updates…") {
+            MillieUpdater.shared.checkForUpdates()
+        }
     }
 }
 
