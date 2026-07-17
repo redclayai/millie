@@ -1258,6 +1258,12 @@ Browser* ActiveBrowser() {
   webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   [self addSubview:webView];
   [self applySuppressionState];
+  // window.open() creates the popup's WebContents hidden+throttled; once we've
+  // adopted it into a visible view, wake it so the page loads at full speed
+  // instead of the background-tab crawl (the Peek's slow-first-paint fix).
+  if (!self.isHidden && _webWindowVisible) {
+    webContents->WasShown();
+  }
   if (!self.isHidden && _webWindowVisible) {
     [self focusBrowser];
   }
