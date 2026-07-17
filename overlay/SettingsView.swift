@@ -313,6 +313,16 @@ struct SettingsView: View {
                     .font(Typography.ui(Typography.base))
                     .foregroundStyle(p.foreground.color)
             }
+            ToggleRow(isOn: $settings.tintedFolderCards) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Tinted folder backgrounds")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text("Wash each sidebar folder in its accent color.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                }
+            }
 
             Hairline().opacity(0.5)
 

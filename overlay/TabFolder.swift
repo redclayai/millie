@@ -13,27 +13,36 @@ struct TabFolder: Identifiable, Equatable, Codable {
     /// permanent user-made folder. Rendered in its own section below the folders
     /// separator with a distinct (non-folder) icon; treated as temporary.
     var isTidy: Bool
+    /// Accent color for the folder glyph (`#rrggbb`). nil = derive from the
+    /// first tab's favicon (its dominant color); `noColor` = explicitly plain
+    /// (no tint, no card wash) for this folder.
+    var colorHex: String?
+
+    /// Sentinel `colorHex` meaning "no tint for this folder".
+    static let noColor = "none"
 
     init(id: UUID = UUID(),
          name: String,
          symbol: String = "folder",
          isExpanded: Bool = true,
          tabIDs: [UUID] = [],
-         isTidy: Bool = false) {
+         isTidy: Bool = false,
+         colorHex: String? = nil) {
         self.id = id
         self.name = name
         self.symbol = symbol
         self.isExpanded = isExpanded
         self.tabIDs = tabIDs
         self.isTidy = isTidy
+        self.colorHex = colorHex
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, symbol, isExpanded, tabIDs, isTidy
+        case id, name, symbol, isExpanded, tabIDs, isTidy, colorHex
     }
 
-    // Custom decode so folders saved before `isTidy` existed still load
-    // (synthesized Codable would throw on the missing key).
+    // Custom decode so folders saved before `isTidy`/`colorHex` existed still
+    // load (synthesized Codable would throw on the missing keys).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -42,5 +51,6 @@ struct TabFolder: Identifiable, Equatable, Codable {
         isExpanded = try c.decodeIfPresent(Bool.self, forKey: .isExpanded) ?? true
         tabIDs = try c.decodeIfPresent([UUID].self, forKey: .tabIDs) ?? []
         isTidy = try c.decodeIfPresent(Bool.self, forKey: .isTidy) ?? false
+        colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex)
     }
 }

@@ -113,6 +113,67 @@ final class LauncherContainerView: NSView {
 
 // MARK: - Palette UI
 
+/// Arc-style site search for the launcher: type a site's keyword ("youtube",
+/// "yt"), press Tab (or Space after the bare keyword), and a colored chip
+/// locks in — everything typed after searches that site directly.
+struct SiteSearch: Identifiable, Equatable {
+    let id: String          // canonical keyword
+    let name: String        // chip label
+    let aliases: [String]   // extra keywords ("yt")
+    let hex: String         // chip color
+    let template: String    // search URL, {query} substituted
+    let home: String        // opened when the query is empty
+
+    var color: Color { TokenColor(hex: hex).color }
+
+    func url(for query: String) -> String {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return home }
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?/#")
+        let encoded = q.addingPercentEncoding(withAllowedCharacters: allowed) ?? q
+        return template.replacingOccurrences(of: "{query}", with: encoded)
+    }
+
+    static let all: [SiteSearch] = [
+        SiteSearch(id: "youtube", name: "YouTube", aliases: ["yt"], hex: "#FF0000",
+                   template: "https://www.youtube.com/results?search_query={query}",
+                   home: "https://www.youtube.com"),
+        SiteSearch(id: "google", name: "Google", aliases: ["g"], hex: "#4285F4",
+                   template: "https://www.google.com/search?q={query}",
+                   home: "https://www.google.com"),
+        SiteSearch(id: "wikipedia", name: "Wikipedia", aliases: ["wiki"], hex: "#5B6470",
+                   template: "https://en.wikipedia.org/wiki/Special:Search?search={query}",
+                   home: "https://en.wikipedia.org"),
+        SiteSearch(id: "reddit", name: "Reddit", aliases: ["r"], hex: "#FF4500",
+                   template: "https://www.reddit.com/search/?q={query}",
+                   home: "https://www.reddit.com"),
+        SiteSearch(id: "github", name: "GitHub", aliases: ["gh"], hex: "#24292F",
+                   template: "https://github.com/search?q={query}&type=repositories",
+                   home: "https://github.com"),
+        SiteSearch(id: "amazon", name: "Amazon", aliases: ["az"], hex: "#FF9900",
+                   template: "https://www.amazon.com/s?k={query}",
+                   home: "https://www.amazon.com"),
+        SiteSearch(id: "x", name: "X", aliases: ["twitter"], hex: "#111111",
+                   template: "https://x.com/search?q={query}",
+                   home: "https://x.com"),
+        SiteSearch(id: "maps", name: "Maps", aliases: ["map"], hex: "#34A853",
+                   template: "https://www.google.com/maps/search/{query}",
+                   home: "https://www.google.com/maps"),
+        SiteSearch(id: "perplexity", name: "Perplexity", aliases: ["px"], hex: "#20808D",
+                   template: "https://www.perplexity.ai/search?q={query}",
+                   home: "https://www.perplexity.ai"),
+    ]
+
+    /// The provider whose keyword/alias exactly matches `text` (trimmed,
+    /// case-insensitive), if any.
+    static func match(_ text: String) -> SiteSearch? {
+        let key = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !key.isEmpty else { return nil }
+        return all.first { $0.id == key || $0.aliases.contains(key) }
+    }
+}
+
 private struct LauncherView: View {
     @ObservedObject var store: BrowserStore
     var scheme: ColorScheme
@@ -120,8 +181,30 @@ private struct LauncherView: View {
 
     @State private var query = ""
     @State private var highlighted = 0
+    @State private var siteSearch: SiteSearch?
 
-    private var items: [LauncherItem] { LauncherItem.build(query: query, store: store) }
+    private var items: [LauncherItem] {
+        // Chip active → one canonical row; Enter and the row do the same thing.
+        if let ss = siteSearch {
+            let title = query.isEmpty ? "Search \(ss.name)…"
+                                      : "Search \(ss.name) for “\(query)”"
+            return [LauncherItem(id: "site-search", title: title,
+                                 url: ss.url(for: query), faviconURL: nil,
+                                 tabID: nil, action: "Search",
+                                 run: { commitSiteSearch() })]
+        }
+        var out = LauncherItem.build(query: query, store: store)
+        // Keyword typed but not yet activated → offer the chip as the top row.
+        if let match = SiteSearch.match(query) {
+            out.insert(LauncherItem(id: "site-hint-\(match.id)",
+                                    title: "Search \(match.name)",
+                                    url: match.home, faviconURL: nil,
+                                    tabID: nil, action: "Tab",
+                                    run: { activateSiteSearch(match) }),
+                       at: 0)
+        }
+        return out
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -149,7 +232,10 @@ private struct LauncherView: View {
         .onChange(of: store.launcherFocusRequest) { _, _ in
             resetForPresentation()
         }
-        .onChange(of: query) { _, _ in highlighted = 0 }
+        .onChange(of: query) { _, text in
+            highlighted = 0
+            autoActivateOnSpace(text)
+        }
     }
 
     private func resetForPresentation() {
@@ -158,6 +244,7 @@ private struct LauncherView: View {
         // field so the first keystroke replaces it wholesale.
         query = store.launcherPrefill
         highlighted = 0
+        siteSearch = nil
     }
 
     private var card: some View {
@@ -208,9 +295,19 @@ private struct LauncherView: View {
             Icon(name: "magnifyingglass", size: 16, weight: .medium)
                 .foregroundStyle(p.mutedForeground.color.opacity(0.65))
 
+            if let ss = siteSearch {
+                Text(ss.name)
+                    .font(Typography.ui(Typography.base, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(ss.color))
+                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+            }
+
             ZStack(alignment: .leading) {
                 if query.isEmpty {
-                    Text("Search or Enter URL…")
+                    Text(siteSearch == nil ? "Search or Enter URL…" : "Search…")
                         .font(Typography.ui(Typography.title))
                         .foregroundStyle(p.mutedForeground.color.opacity(0.65))
                 }
@@ -221,7 +318,9 @@ private struct LauncherView: View {
                                     insertionColor: p.primary.nsColor,
                                     onMove: move,
                                     onEscape: store.dismissLauncher,
-                                    onSubmit: commit)
+                                    onSubmit: commit,
+                                    onTab: handleTab,
+                                    onEmptyDelete: handleEmptyDelete)
                     .frame(height: 24)
             }
 
@@ -288,10 +387,51 @@ private struct LauncherView: View {
     }
 
     private func commit() {
+        if siteSearch != nil {
+            commitSiteSearch()
+            return
+        }
         if items.indices.contains(highlighted) {
             activate(items[highlighted])
         } else {
             store.launcherOpen(query)
+        }
+    }
+
+    // MARK: Site search (chip)
+
+    private func activateSiteSearch(_ provider: SiteSearch) {
+        withAnimation(Motion.snappy) { siteSearch = provider }
+        query = ""
+        highlighted = 0
+    }
+
+    private func commitSiteSearch() {
+        guard let ss = siteSearch else { return }
+        store.launcherOpen(url: ss.url(for: query))
+        siteSearch = nil
+    }
+
+    /// Tab pressed in the field: lock in a matching keyword as a chip.
+    private func handleTab() -> Bool {
+        guard siteSearch == nil, let match = SiteSearch.match(query) else { return false }
+        activateSiteSearch(match)
+        return true
+    }
+
+    /// Backspace in an empty field: dissolve the chip back into its keyword.
+    private func handleEmptyDelete() -> Bool {
+        guard let ss = siteSearch else { return false }
+        withAnimation(Motion.snappy) { siteSearch = nil }
+        query = ss.id
+        return true
+    }
+
+    /// Space after a bare keyword activates the chip too ("youtube ␣").
+    private func autoActivateOnSpace(_ text: String) {
+        guard siteSearch == nil, text.hasSuffix(" ") else { return }
+        if let match = SiteSearch.match(text) {
+            activateSiteSearch(match)
         }
     }
 
@@ -348,6 +488,10 @@ private struct LauncherSearchField: NSViewRepresentable {
     let onMove: (Int) -> Void
     let onEscape: () -> Void
     let onSubmit: () -> Void
+    /// Tab pressed — return true when handled (site-search chip activation).
+    var onTab: () -> Bool = { false }
+    /// Backspace in an empty field — return true when handled (chip removal).
+    var onEmptyDelete: () -> Bool = { false }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -419,6 +563,11 @@ private struct LauncherSearchField: NSViewRepresentable {
             case #selector(NSResponder.cancelOperation(_:)):
                 parent.onEscape()
                 return true
+            case #selector(NSResponder.insertTab(_:)):
+                return parent.onTab()
+            case #selector(NSResponder.deleteBackward(_:)):
+                guard textView.string.isEmpty else { return false }
+                return parent.onEmptyDelete()
             default:
                 return false
             }

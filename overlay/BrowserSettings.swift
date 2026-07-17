@@ -135,6 +135,12 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(autoSleepMinutes, forKey: Key.autoSleepMinutes) }
     }
 
+    /// Tinted folder/group cards in the sidebar (accent-colored backgrounds).
+    /// Off = plain sidebar, no wash behind groups.
+    @Published var tintedFolderCards: Bool {
+        didSet { defaults.set(tintedFolderCards, forKey: Key.tintedFolderCards) }
+    }
+
     /// Split view: the left pane's fraction of the width (0.2…0.8). Persisted so
     /// the user's preferred split ratio survives restarts and new splits.
     @Published var splitRatio: Double {
@@ -217,6 +223,7 @@ final class BrowserSettings: ObservableObject {
         static let gradientTheme = "mori.gradientTheme"
         static let autoSleepMinutes = "mori.autoSleepMinutes"
         static let splitRatio = "mori.splitRatio"
+        static let tintedFolderCards = "mori.tintedFolderCards"
         static let autoArchiveHours = "mori.autoArchiveHours"
         static let tabCycleOrder = "mori.tabCycleOrder"
     }
@@ -264,6 +271,7 @@ final class BrowserSettings: ObservableObject {
         autoPiP = defaults.object(forKey: Key.autoPiP) as? Bool ?? true
         autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 60
         splitRatio = defaults.object(forKey: Key.splitRatio) as? Double ?? 0.5
+        tintedFolderCards = defaults.object(forKey: Key.tintedFolderCards) as? Bool ?? true
         autoArchiveHours = defaults.object(forKey: Key.autoArchiveHours) as? Int ?? 24
         // Default to Arc/Dia behavior: Ctrl+Tab walks most-recently-used tabs.
         tabCycleOrder = TabCycleOrder(rawValue: defaults.string(forKey: Key.tabCycleOrder) ?? "")
