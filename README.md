@@ -23,7 +23,7 @@ Apple Silicon · macOS 14 Sonoma or later. Signed & notarized by Red Clay AI, In
 
 - **Web Panels** — pin the apps you keep coming back to — chat, music, a calendar, your notes — into a slide-in side panel that lives beside whatever you're reading. Right-click any tab and choose **Add to Web Panels**.
 
-![Web Panels](docs/screenshots/web-panels.png)
+
 
 ## Built for power users
 
@@ -33,8 +33,6 @@ Apple Silicon · macOS 14 Sonoma or later. Signed & notarized by Red Clay AI, In
 - Most-recently-used ⌘-Tab switching with live tab previews.
 - **Peek** any link in a floating overlay, then promote it into a full tab or a split when you want to keep it.
 - Familiar Chrome keyboard shortcuts work out of the box — and a complete cheat sheet is one ⌘/ away.
-
-![Keyboard shortcuts](docs/screenshots/shortcuts.png)
 
 ## Private by default
 
