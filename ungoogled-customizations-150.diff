@@ -1,0 +1,38 @@
+diff --git a/patches/extra/ungoogled-chromium/prepopulated-search-engines.patch b/patches/extra/ungoogled-chromium/prepopulated-search-engines.patch
+index ea148db2..7e7586f5 100644
+--- a/patches/extra/ungoogled-chromium/prepopulated-search-engines.patch
++++ b/patches/extra/ungoogled-chromium/prepopulated-search-engines.patch
+@@ -1,13 +1,9 @@
+-# Disables Site search Starter Pack
++# No-op: `kStarterPackExpansion` is what registers YouTube / Amazon /
++# Wikipedia / etc. as Tab-to-Search keyword-search providers. Disabling
++# this made the omnibox suggestion still show "Search YouTube · Tab" via
++# history/autocomplete, but the actual keyword provider was gone, so
++# Tab was a no-op. Keeping Chromium's default (enabled on non-iOS).
++#
++# If you need to hide Google's built-in AI shortcuts (@gemini / @aimode
++# / @page), those are already gated in disable-ai-search-shortcuts.patch.
+ #
+---- a/components/omnibox/common/omnibox_features.cc
+-+++ b/components/omnibox/common/omnibox_features.cc
+-@@ -286,7 +286,7 @@ BASE_FEATURE(kOmniboxTouchDownTriggerFor
+- BASE_FEATURE(kOmniboxSiteSearch, DISABLED);
+- 
+- // Enables additional site search providers for the Site search Starter Pack.
+--BASE_FEATURE(kStarterPackExpansion, enable_if(!IS_IOS));
+-+BASE_FEATURE(kStarterPackExpansion, base::FEATURE_DISABLED_BY_DEFAULT);
+- 
+- // Enables an informational IPH message at the bottom of the Omnibox directing
+- // users to certain starter pack engines.
+diff --git a/patches/series b/patches/series
+index cda89532..c6f50cdc 100644
+--- a/patches/series
++++ b/patches/series
+@@ -77,7 +77,6 @@ extra/ungoogled-chromium/add-flag-to-close-window-with-last-tab.patch
+ extra/ungoogled-chromium/add-flag-to-convert-popups-to-tabs.patch
+ extra/ungoogled-chromium/add-flag-to-disable-local-history-expiration.patch
+ extra/ungoogled-chromium/add-extra-channel-info.patch
+-extra/ungoogled-chromium/prepopulated-search-engines.patch
+ extra/ungoogled-chromium/add-flag-to-clear-data-on-exit.patch
+ extra/ungoogled-chromium/add-flag-for-tabsearch-button.patch
+ extra/ungoogled-chromium/add-flag-for-grab-handle.patch

@@ -240,6 +240,10 @@ final class MoriRoot: NSObject {
     static func openNewTab(url: String) {
         guard let store = shared?.store else { return }
         let target = url.isEmpty ? "about:blank" : url
+        // Non-web links (mailto:, tel:, …) that arrive as engine-created tabs
+        // (target=_blank / window.open) hand off to the OS instead of becoming
+        // a blank Millie tab.
+        if store.openExternalScheme(target) { return }
         // Arc-style auto-Peek: a link that opens a new tab (window.open /
         // target=_blank) from a PINNED tab previews in the floating Peek
         // instead of spawning a tab. window.open() commits about:blank first,
@@ -258,6 +262,17 @@ final class MoriRoot: NSObject {
     /// True once the SwiftUI root (and its store) exists, so openNewTabWithURL:
     /// will actually create a tab. Used by the external-URL handler to defer
     /// links that arrive during a cold launch until the UI is ready.
+    /// External app-scheme link (webex://, msteams://, zoommtg://, tel:, …)
+    /// intercepted at the engine level (ChromeContentBrowserClient::
+    /// HandleExternalProtocol). Hand it to the OS's default app. Chrome's own
+    /// external-protocol path needs a confirmation dialog Millie's non-Views
+    /// chrome never shows, so without this these links silently do nothing from
+    /// any surface (main tab, web panel, Peek, popup).
+    @objc(openExternalSchemeWithURL:)
+    static func openExternalScheme(url: String) {
+        shared?.store.openExternalScheme(url)
+    }
+
     @objc static func uiReady() -> Bool { shared != nil }
     /// File-menu "New Incognito Window" (⇧⌘N) → Millie's private Space.
     @objc static func newPrivateWindow() { shared?.store.openPrivateWindow() }

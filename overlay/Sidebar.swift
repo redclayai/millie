@@ -1016,6 +1016,8 @@ struct TabMenu: View {
             .disabled(tab.isDetached)
         Button("Duplicate Tab") { store.duplicateTab(tab.id) }
         Button("Copy URL") { store.copyURL(of: tab.id) }
+        Button("Add to Web Panels") { store.addWebPanel(fromTab: tab.id) }
+            .disabled(!tab.urlString.hasPrefix("http"))
         ShareMenu(urlString: tab.urlString)
         Divider()
         Button {
@@ -1076,6 +1078,7 @@ private struct SidebarBottomBar: View {
                     .padding(.horizontal, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            WebPanelRail(store: store)
             bar
         }
         .animation(Motion.reveal, value: updates.availableVersion)
@@ -1340,5 +1343,259 @@ struct ShareMenu: View {
         // only way to render the services inline as menu items (the picker shows
         // its own popover). Still fully functional.
         return NSSharingService.sharingServices(forItems: [url])
+    }
+}
+
+// MARK: - Web panels (Vivaldi-style right dock)
+
+/// The right-edge dock hosting one web panel's live site, with a slim header
+/// (favicon/title + reload / open-in-tab / close) and a draggable inner edge to
+/// resize. The web view is a persistent BrowserTab owned by the store.
+struct WebPanelDock: View {
+    @ObservedObject var store: BrowserStore
+    @ObservedObject private var settings = BrowserSettings.shared
+    @Environment(\.palette) private var p
+    let panel: WebPanel
+
+    @State private var dragStartWidth: CGFloat?
+    @State private var handleHovered = false
+    /// Width of the drag divider on the dock's inner edge. The panel's live web
+    /// view is a child NSWindow that mirrors the WebPanelHost's frame — so we
+    /// inset the host by this much to keep the handle strip UNCOVERED, otherwise
+    /// the web view sits on top of it and swallows the drag (the resize bug).
+    private let handleWidth: CGFloat = 10
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Hairline().opacity(0.6)
+            if let tab = store.panelTab(for: panel.id) {
+                WebPanelHost(tab: tab, store: store)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Spacer()
+            }
+        }
+        .padding(.leading, handleWidth)   // reserve the divider strip (see above)
+        .frame(width: settings.webPanelWidth)
+        .background(p.background.color.ignoresSafeArea())
+        // Draggable resize divider on the dock's inner (leading) edge — drag
+        // left to widen, right to narrow. Lives in the reserved strip so the
+        // panel's child window can't cover it.
+        .overlay(alignment: .leading) { resizeDivider }
+    }
+
+    private var resizeDivider: some View {
+        ZStack {
+            Rectangle().fill(p.border.color.opacity(0.6)).frame(width: 1)
+            Capsule()
+                .fill(p.mutedForeground.color.opacity(handleHovered ? 0.7 : 0.35))
+                .frame(width: 4, height: 36)
+        }
+        .frame(width: handleWidth)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover {
+            handleHovered = $0
+            $0 ? NSCursor.resizeLeftRight.push() : NSCursor.pop()
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { v in
+                    let start = dragStartWidth ?? settings.webPanelWidth
+                    if dragStartWidth == nil { dragStartWidth = start }
+                    settings.webPanelWidth = start - Double(v.translation.width)
+                }
+                .onEnded { _ in dragStartWidth = nil })
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Favicon(icon: panel.faviconURL, page: panel.url,
+                    image: store.panelTab(for: panel.id)?.faviconImage, size: 15)
+            Text(store.panelTab(for: panel.id)?.displayTitle.isEmpty == false
+                    ? store.panelTab(for: panel.id)!.displayTitle
+                    : (panel.title.isEmpty ? "Panel" : panel.title))
+                .font(Typography.ui(Typography.base, weight: .medium))
+                .foregroundStyle(p.foreground.color)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            IconButton(systemName: "arrow.clockwise", size: 26, help: "Reload") {
+                store.panelTab(for: panel.id)?.reload()
+            }
+            IconButton(systemName: "arrow.up.forward.app", size: 26,
+                       help: "Open in a tab") {
+                _ = store.newTab(url: panel.url, select: true)
+                store.closePanelDock()
+            }
+            IconButton(systemName: "xmark", size: 26, help: "Close panel") {
+                store.closePanelDock()
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 46)
+    }
+}
+
+/// Hosts a web panel's live CEF view inside the dock.
+/// A borderless child window that hosts a web panel's live web view. It becomes
+/// the key window ONLY when the user actually clicks the panel: BrowserStore's
+/// click router (`routePanelClick`) flips `mayBecomeKey` and makes it key on a
+/// panel click, and clears it — handing key back to the main window — on any
+/// click outside the panel. Gating key status on a real click is what stops a
+/// *playing* panel (YouTube etc.) from programmatically grabbing the key window
+/// and stealing ⌘V/typing from the main tab, while still letting you click into
+/// the panel and type there. Clicks, scrolling and media controls work
+/// regardless — mouse events don't require key status.
+final class PanelChildWindow: NSWindow {
+    /// Set true by the click router only while focus is meant to be in the
+    /// panel; false otherwise, so nothing but a user click can key it.
+    var mayBecomeKey = false
+    override var canBecomeKey: Bool { mayBecomeKey }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Owns the panel's child window: hosts the web view, mirrors the placeholder's
+/// on-screen frame, and hides while a full-window overlay (launcher, Peek,
+/// settings…) is up so the floating child can't cover it.
+final class PanelWindowController {
+    let window = PanelChildWindow(contentRect: .zero,
+                                  styleMask: [.borderless],
+                                  backing: .buffered, defer: true)
+    private weak var placeholder: NSView?
+    private weak var hosted: NSView?
+    private var observers: [Any] = []
+
+    init(cornerRadius: CGFloat = 0) {
+        window.isOpaque = cornerRadius == 0
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.isReleasedWhenClosed = false
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.cornerCurve = .continuous
+        content.layer?.cornerRadius = cornerRadius
+        content.layer?.masksToBounds = cornerRadius > 0
+        window.contentView = content
+    }
+
+    func attach(view: NSView, over placeholder: NSView, visible: Bool) {
+        self.placeholder = placeholder
+        if hosted !== view {
+            hosted?.removeFromSuperview()
+            view.frame = window.contentView?.bounds ?? .zero
+            view.autoresizingMask = [.width, .height]
+            window.contentView?.addSubview(view)
+            hosted = view
+        }
+        guard let parent = placeholder.window else { return }
+        if window.parent !== parent {
+            window.parent?.removeChildWindow(window)
+            parent.addChildWindow(window, ordered: .above)
+        }
+        installObservers(on: placeholder, parent: parent)
+        reposition()
+        setVisible(visible)
+    }
+
+    func setVisible(_ visible: Bool) {
+        if visible {
+            if !window.isVisible { window.orderFront(nil) }
+            reposition()
+        } else if window.isVisible {
+            window.orderOut(nil)
+        }
+    }
+
+    private func reposition() {
+        guard let placeholder, let parent = placeholder.window,
+              placeholder.superview != nil else { return }
+        let inWindow = placeholder.convert(placeholder.bounds, to: nil)
+        window.setFrame(parent.convertToScreen(inWindow), display: true)
+    }
+
+    private func installObservers(on placeholder: NSView, parent: NSWindow) {
+        guard observers.isEmpty else { return }
+        placeholder.postsFrameChangedNotifications = true
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(
+            forName: NSView.frameDidChangeNotification, object: placeholder,
+            queue: .main) { [weak self] _ in self?.reposition() })
+        for name in [NSWindow.didResizeNotification, NSWindow.didMoveNotification] {
+            observers.append(nc.addObserver(forName: name, object: parent,
+                                            queue: .main) { [weak self] _ in self?.reposition() })
+        }
+    }
+
+    func teardown() {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+        hosted?.removeFromSuperview()
+        hosted = nil
+        window.parent?.removeChildWindow(window)
+        window.orderOut(nil)
+    }
+}
+
+private struct WebPanelHost: NSViewRepresentable {
+    @ObservedObject var tab: BrowserTab
+    @ObservedObject var store: BrowserStore
+
+    func makeCoordinator() -> PanelWindowController { PanelWindowController() }
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let view = tab.realize()
+        view.setWebWindowVisible(true)
+        view.setPageHidden(false)
+        // Host the panel web view in its own child window (not a subview of the
+        // main window), so it has a separate first-responder and can't grab the
+        // main tab's keyboard. Deferred so the placeholder is in a window first.
+        let coordinator = context.coordinator
+        let visible = !store.panelOverlayObscured
+        DispatchQueue.main.async {
+            coordinator.attach(view: view, over: nsView, visible: visible)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: PanelWindowController) {
+        coordinator.teardown()
+    }
+}
+
+/// The panel rail: one favicon toggle per web panel, shown in the sidebar
+/// bottom area. The active panel is highlighted; right-click removes.
+struct WebPanelRail: View {
+    @ObservedObject var store: BrowserStore
+    @ObservedObject private var settings = BrowserSettings.shared
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        if !settings.webPanels.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(settings.webPanels) { panel in
+                    Button { store.togglePanel(panel.id) } label: {
+                        Favicon(icon: panel.faviconURL, page: panel.url, size: 16)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                                    .fill(store.activePanelID == panel.id
+                                          ? p.primary.color.opacity(0.28) : .clear))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(panel.title.isEmpty ? panel.url : panel.title)
+                    .contextMenu {
+                        Button("Remove Panel", role: .destructive) {
+                            store.removeWebPanel(panel.id)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+        }
     }
 }

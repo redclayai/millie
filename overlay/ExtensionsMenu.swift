@@ -174,6 +174,9 @@ struct ExtensionsMenu: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            actionRow
+            Hairline().opacity(0.6)
+
             sectionHeader("Extensions")
             extensionGrid
 
@@ -192,6 +195,42 @@ struct ExtensionsMenu: View {
             if let s = siteURL { siteBlocked = extensions.areExtensionsBlocked(onSite: s) }
             if let h = siteHost { adsAllowed = AdBlockStore.shared.isAllowed(host: h) }
         }
+    }
+
+    // MARK: - Quick actions
+
+    private var actionRow: some View {
+        HStack(spacing: 6) {
+            actionButton("square.and.arrow.up", "Share…") {
+                dismiss(); store.shareCurrentPage()
+            }
+            actionButton("camera.viewfinder", "Capture Region") {
+                dismiss(); store.startRegionCapture()
+            }
+            actionButton("wand.and.stars", "Boost This Site") {
+                dismiss(); store.presentBoostEditor()
+            }
+            actionButton("doc.viewfinder", "Capture Full Page") {
+                dismiss(); store.captureFullPage()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func actionButton(_ icon: String, _ help: String,
+                              _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                .fill(p.input.color.opacity(0.5))
+                .frame(width: 42, height: 32)
+                .overlay(Icon(name: icon, size: 14, weight: .regular)
+                    .foregroundStyle(p.foreground.color))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     // MARK: - Extensions grid

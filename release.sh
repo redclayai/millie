@@ -140,6 +140,27 @@ echo "==> Signing outer app"
 echo "==> Verifying signature"
 codesign --verify --deep --strict --verbose=2 "$STAGE"
 
+# ---- Archive dSYMs keyed by UUID --------------------------------------------
+# The shipped framework is stripped, so a crash report only symbolicates against
+# the matching .dSYM. Keep one per release (keyed by the framework's build UUID)
+# so any future crash can be resolved with:
+#   atos -o <dSYM>/Contents/Resources/DWARF/"Chromium Framework" -arch arm64 \
+#        -l <loadAddr> <addr>...
+_fw_bin="$(/usr/bin/find "$STAGE/Contents/Frameworks/Chromium Framework.framework" -type f -name "Chromium Framework" | head -1)"
+if [[ -n "$_fw_bin" ]]; then
+  _fw_uuid="$(dwarfdump --uuid "$_fw_bin" 2>/dev/null | awk '{print $2}')"
+  _dsym_src="$ROOT/build/src/out/Default/Chromium Framework.dSYM"
+  if [[ -n "$_fw_uuid" && -d "$_dsym_src" ]]; then
+    _sym_dir="$OUT/symbols/$_fw_uuid"
+    if [[ ! -d "$_sym_dir/Chromium Framework.dSYM" ]]; then
+      echo "==> Archiving dSYM for $_fw_uuid → $_sym_dir"
+      mkdir -p "$_sym_dir"
+      /usr/bin/ditto "$_dsym_src" "$_sym_dir/Chromium Framework.dSYM"
+      printf '%s\n' "$MILLIE_VERSION ($BUILD_NUMBER)" > "$_sym_dir/version.txt"
+    fi
+  fi
+fi
+
 # ---- Notarize + staple the app ----------------------------------------------
 if [[ $NOTARIZE -eq 1 ]]; then
   echo "==> Notarizing app (this calls Apple; may take a few minutes)"

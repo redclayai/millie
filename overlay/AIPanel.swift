@@ -264,6 +264,12 @@ struct AIPanel: View {
                 .lineLimit(1...6)
                 .padding(.vertical, 6)
                 .focused($inputFocused)
+                // Bridge the composer focus to the store so the panel click
+                // router can force it to resign (letting main-tab ⌘C/⌘V work).
+                .onChange(of: inputFocused) { _, focused in store.aiInputFocused = focused }
+                .onChange(of: store.aiInputFocused) { _, focused in
+                    if inputFocused != focused { inputFocused = focused }
+                }
                 .onSubmit(send)
 
             Button(action: send) {

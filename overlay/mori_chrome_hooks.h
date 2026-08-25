@@ -71,6 +71,15 @@ void OnBrowserActivateRequested(Browser* browser);
 // BrowserCommandController::ExecuteCommandWithDisposition.
 bool HandleBrowserCommand(int command_id);
 
+// Launch an app-scheme link (webex://, msteams://, zoommtg://, tel:, sms:, …)
+// via the OS's default app instead of Chrome's external-protocol path, which
+// needs a confirmation dialog Millie's non-Views chrome never presents (so the
+// link silently does nothing). Covers every surface — tab, web panel, Peek,
+// popup — because they all funnel through HandleExternalProtocol. Gated on a
+// user gesture; returns true if Millie consumed the URL, false to let Chrome's
+// default path run. Called from ChromeContentBrowserClient::HandleExternalProtocol.
+bool HandleExternalProtocol(const GURL& url, bool has_user_gesture);
+
 #ifdef __OBJC__
 // The shared Millie main window (used for GetNativeWindow / dialog parenting).
 NSWindow* MoriMainWindow();

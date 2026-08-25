@@ -70,6 +70,125 @@ extension BrowserStore {
         Self.deliver(cropped)
     }
 
+    /// Capture the ENTIRE scrollable page (not just the viewport) by scrolling
+    /// through it a viewport at a time, grabbing each frame, and stitching them
+    /// into one tall image. Chromium has no one-shot full-page capture we can
+    /// reach from the overlay, so this is a scroll-and-stitch. Fixed/sticky
+    /// headers repeat across slices — a known limitation of this approach.
+    func captureFullPage() {
+        guard let tab = selectedTab, tab.hasRealized,
+              tab.urlString.hasPrefix("http") else {
+            ToastCenter.shared.show("Nothing to capture", icon: "camera", style: .warning)
+            return
+        }
+        ToastCenter.shared.show("Capturing full page…", icon: "camera.viewfinder",
+                                style: .info, duration: 2)
+        Task { @MainActor in await self.runFullPageCapture(tab) }
+    }
+
+    @MainActor
+    private func runFullPageCapture(_ tab: BrowserTab) async {
+        let view = tab.browserView
+        guard let window = view.window else { captureVisibleArea(); return }
+        let scale = window.backingScaleFactor
+
+        let metricsJS = """
+        JSON.stringify((function(){
+          var de = document.documentElement, b = document.body || de;
+          return { pageH: Math.max(de.scrollHeight, b.scrollHeight, de.clientHeight),
+                   vw: window.innerWidth, vh: window.innerHeight,
+                   sx: window.pageXOffset, sy: window.pageYOffset }; })())
+        """
+        guard let m = await Self.evalNumbers(tab, metricsJS),
+              let pageH = m["pageH"], let vh = m["vh"], let vw = m["vw"],
+              let origSy = m["sy"], let origSx = m["sx"], vh > 1, pageH > 1 else {
+            captureVisibleArea(); return
+        }
+        // Cap runaway pages (~40 screens) so a broken layout can't hang capture.
+        let totalH = min(pageH, vh * 40)
+        let steps = max(1, Int(ceil(totalH / vh)))
+
+        let pxW = Int((vw * scale).rounded()), pxH = Int((totalH * scale).rounded())
+        guard pxW > 0, pxH > 0,
+              let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: pxW, pixelsHigh: pxH,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let gctx = NSGraphicsContext(bitmapImageRep: rep) else {
+            captureVisibleArea(); return
+        }
+        rep.size = NSSize(width: vw, height: totalH)
+
+        // Hide scrollbars while capturing so they don't streak the stitch.
+        _ = try? await tab.evaluateJavaScript(
+            "document.documentElement.style.overflow='hidden';")
+
+        for i in 0..<steps {
+            let y = Double(i) * vh
+            _ = try? await tab.evaluateJavaScript("window.scrollTo(0,\(y));")
+            try? await Task.sleep(nanoseconds: 200_000_000)  // let it paint
+            guard let full = Self.captureWindowImage(window),
+                  let vpCG = Self.cropWebView(view, from: full, scale: scale) else { continue }
+            let vpImage = NSImage(cgImage: vpCG, size: NSSize(width: vw, height: vh))
+            let sliceH = min(vh, totalH - y)             // last row may be partial
+            let dest = NSRect(x: 0, y: totalH - (y + sliceH), width: vw, height: sliceH)
+            let src = NSRect(x: 0, y: vh - sliceH, width: vw, height: sliceH)  // top of viewport
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = gctx
+            vpImage.draw(in: dest, from: src, operation: .copy, fraction: 1.0)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        _ = try? await tab.evaluateJavaScript(
+            "document.documentElement.style.overflow='';window.scrollTo(\(origSx),\(origSy));")
+
+        guard let cg = rep.cgImage else { captureVisibleArea(); return }
+        Self.deliver(cg)
+    }
+
+    /// Run a JS snippet returning a JSON object of numbers; parse to [String:Double].
+    private static func evalNumbers(_ tab: BrowserTab, _ js: String) async -> [String: Double]? {
+        guard let raw = try? await tab.evaluateJavaScript(js),
+              let str = raw as? String, let data = str.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        var out: [String: Double] = [:]
+        for (k, v) in obj { if let n = v as? NSNumber { out[k] = n.doubleValue } }
+        return out
+    }
+
+    /// Crop the web view's region (in device pixels) out of a full-window grab.
+    private static func cropWebView(_ view: NSView, from full: CGImage,
+                                    scale: CGFloat) -> CGImage? {
+        guard let window = view.window else { return nil }
+        let contentH = window.contentView?.bounds.height ?? window.frame.height
+        let inWindow = view.convert(view.bounds, to: nil)
+        let topLeft = CGRect(x: inWindow.minX, y: contentH - inWindow.maxY,
+                             width: inWindow.width, height: inWindow.height)
+        let px = CGRect(x: topLeft.minX * scale, y: topLeft.minY * scale,
+                        width: topLeft.width * scale, height: topLeft.height * scale)
+            .intersection(CGRect(x: 0, y: 0, width: full.width, height: full.height))
+        guard !px.isNull, px.width > 1, px.height > 1 else { return nil }
+        return full.cropping(to: px)
+    }
+
+    /// Present the native macOS share sheet for the current page URL, anchored to
+    /// the top-trailing corner of the content area.
+    func shareCurrentPage() {
+        guard let tab = selectedTab, tab.urlString.hasPrefix("http"),
+              let url = URL(string: tab.urlString) else {
+            ToastCenter.shared.show("Nothing to share", icon: "square.and.arrow.up",
+                                    style: .warning)
+            return
+        }
+        guard let window = tab.browserView.window ?? NSApp.keyWindow,
+              let content = window.contentView else { return }
+        let picker = NSSharingServicePicker(items: [url])
+        let anchor = NSRect(x: content.bounds.maxX - 44, y: content.bounds.maxY - 44,
+                            width: 1, height: 1)
+        picker.show(relativeTo: anchor, of: content, preferredEdge: .minY)
+    }
+
     private func captureWindow() -> NSWindow? {
         selectedTab?.browserView.window ?? NSApp.keyWindow ?? NSApp.mainWindow
     }

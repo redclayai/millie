@@ -129,6 +129,23 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 /// Make this browser the first responder / give it keyboard focus.
 - (void)focusBrowser;
 
+/// Take key-window + first-responder for this browser WITHOUT calling
+/// RenderWidgetHost::Focus()/WebContents::Focus(). Used when handing the
+/// keyboard back to the main tab after a web panel had focus: it routes
+/// ⌘C/⌘V/typing to this web content but leaves the renderer's focused element
+/// (the field the user just clicked) untouched, so paste still has a caret to
+/// target. focusBrowser's page-level Focus() calls blur that field.
+- (void)takeKeyboardFocusPreservingPage;
+
+/// Deterministic clipboard commands that act on THIS tab's web contents
+/// regardless of which window/field holds OS focus (content::WebContents::
+/// Copy/Cut/Paste/SelectAll operate on the tab's own focused frame). Used to
+/// make ⌘C/⌘X/⌘V/⌘A always work from the main tab even while a panel is open.
+- (void)copySelection;
+- (void)cutSelection;
+- (void)pasteClipboard;
+- (void)selectAllContent;
+
 /// Mirror Millie's pinned-tab state into Chrome's real TabStripModel so Chrome
 /// APIs, extension APIs, and tab ordering agree with Millie's sidebar.
 - (void)setTabPinned:(BOOL)pinned;

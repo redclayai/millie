@@ -15,13 +15,17 @@ FAILS=()
 pkill -9 Millie 2>/dev/null; sleep 1
 
 # Detached launch (a plain spawn holds the pipe and hangs harness timeouts).
-/usr/bin/python3 - "$BIN" "https://example.com" <<'EOF'
+# Capture the app's stderr to a file so health-signal checks read it directly
+# (immediate) instead of the unified log (unpredictable ingestion lag).
+RUNLOG="$(mktemp -t millie_smoke)"
+/usr/bin/python3 - "$BIN" "https://example.com" "$RUNLOG" <<'EOF'
 import os, sys
-b, url = sys.argv[1], sys.argv[2]
+b, url, logf = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.fork() == 0:
     os.setsid()
-    fd = os.open("/dev/null", os.O_RDWR)
-    os.dup2(fd, 0); os.dup2(fd, 1); os.dup2(fd, 2)
+    devnull = os.open("/dev/null", os.O_RDONLY)
+    out = os.open(logf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    os.dup2(devnull, 0); os.dup2(out, 1); os.dup2(out, 2)
     os.execv(b, [b, url])
 EOF
 
@@ -35,9 +39,15 @@ pgrep -x Millie >/dev/null || FAILS+=("browser process died within 8s")
 pgrep -f 'Chromium Helper \(Renderer\)' >/dev/null || FAILS+=("no renderer process")
 pgrep -f 'network.mojom.NetworkService' >/dev/null || FAILS+=("no network service")
 
-# 3. Health signals in the unified log (Millie-specific subsystems).
-LOG=$(/usr/bin/log show --predicate 'process=="Millie"' --last 2m 2>/dev/null)
-echo "$LOG" | grep -q 'MILLIE_ADBLOCK loaded' || FAILS+=("adblock list did not load")
+# 3. Health signals from the app's stderr (Millie-specific subsystems). Read the
+# captured RUNLOG directly — NSLog writes there immediately, so this is not
+# subject to unified-log ingestion lag. Poll briefly for the app to reach it.
+adblock_ok=0
+for _ in $(seq 1 10); do
+  if grep -q 'MILLIE_ADBLOCK loaded' "$RUNLOG" 2>/dev/null; then adblock_ok=1; break; fi
+  sleep 1
+done
+[ "$adblock_ok" = 1 ] || FAILS+=("adblock list did not load")
 
 # 4. Bundle resources that must ship.
 [ -f "$APP/Contents/Resources/adhosts.bin" ]    || FAILS+=("adhosts.bin missing from bundle")
@@ -47,6 +57,7 @@ echo "$LOG" | grep -q 'MILLIE_ADBLOCK loaded' || FAILS+=("adblock list did not l
 codesign --verify --deep --strict "$APP" 2>/dev/null || FAILS+=("codesign verify failed")
 
 pkill -9 Millie 2>/dev/null
+rm -f "$RUNLOG"
 
 if [ ${#FAILS[@]} -gt 0 ]; then
   echo "SMOKE TEST FAIL:"

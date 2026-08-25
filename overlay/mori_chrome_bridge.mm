@@ -13,6 +13,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/functional/bind.h"
@@ -21,7 +22,11 @@
 #include "base/scoped_observation.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/path_service.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/task/thread_pool.h"
 #include "base/values.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/devtools/devtools_window.h"
@@ -34,6 +39,7 @@
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "chrome/common/chrome_isolated_world_ids.h"
+#include "chrome/common/chrome_paths.h"
 #include "components/favicon/content/content_favicon_driver.h"
 #include "components/favicon/core/favicon_driver.h"
 #include "components/favicon/core/favicon_driver_observer.h"
@@ -53,7 +59,8 @@
 #include <map>
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/referrer.h"
 #include "content/public/browser/browser_context.h"
@@ -79,6 +86,7 @@
                            modifierMask:(NSUInteger)modifierMask;
 + (void)newTab;
 + (void)openNewTabWithURL:(NSString*)url;
++ (void)openExternalSchemeWithURL:(NSString*)url;
 + (void)newWindow;
 + (void)newPrivateWindow;
 + (void)reopenClosedTab;
@@ -129,6 +137,18 @@ int g_next_browser_identifier = 1;
 // When YES, hiding a tab with a playing video pops it out to Picture-in-Picture
 // (driven from -setPageHidden:). Mirrors BrowserSettings.autoPiP.
 BOOL g_mori_auto_pip = YES;
+
+// M151 replaced chrome::FindBrowserWithTab (returned Browser*) with
+// GlobalBrowserCollection::FindBrowserWithTab, which returns the newer
+// BrowserWindowInterface*. We still need the concrete Browser* (as a
+// WebContentsDelegate / for tab_strip_model()), so bridge through the
+// migration accessor. Null-safe so the callers' `if (Browser* x = ...)`
+// guards keep working.
+Browser* MoriFindBrowserWithTab(content::WebContents* wc) {
+  BrowserWindowInterface* bwi =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(wc);
+  return bwi ? bwi->GetBrowserForMigrationOnly() : nullptr;
+}
 
 std::map<content::WebContents*, __weak MoriBrowserView*>& ViewMap() {
   static std::map<content::WebContents*, __weak MoriBrowserView*> map;
@@ -588,7 +608,7 @@ class MoriTabStripBridge : public TabStripModelObserver {
       // Delegate to the Browser that actually owns this WebContents (its own
       // profile), so popups/AddNewContents route into the matching tab strip
       // instead of forcing a foreign-profile insert into the primary Browser.
-      if (Browser* owner = chrome::FindBrowserWithTab(wc)) {
+      if (Browser* owner = MoriFindBrowserWithTab(wc)) {
         wc->SetDelegate(owner);
       } else if (g_mori_browser) {
         wc->SetDelegate(g_mori_browser);
@@ -625,8 +645,21 @@ class MoriTabStripBridge : public TabStripModelObserver {
                                    ? url.spec()
                                    : std::string("about:blank");
       OrphanMap().emplace(spec, wc);
-      NSLog(@"MORI adopt-orphan url=%s", spec.c_str());
-      [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(spec)];
+      // Defer the Millie-side tab creation to the next runloop tick. We are
+      // inside TabStripModel::OnTabStripModelChanged — the strip is mid-insert.
+      // openNewTab -> peek()/newTab() realizes a WebContents and synchronously
+      // mounts its SwiftUI host (withAnimation flushes the transaction now),
+      // and that mount runs viewDidMoveToWindow -> engineAttachWebContents ->
+      // focusBrowser -> TabStripModel::ActivateTabAt. Mutating the strip from
+      // within its own observer trips ValidateNotReentrant and hard-crashes.
+      // PostTask runs the creation after this mutation unwinds. The orphan is
+      // registered synchronously above, so adoption still matches on the next
+      // tick. (v2.39 deferred only peek()'s close(); this covers the whole
+      // creation path — close, mount, attach, and activate.)
+      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, base::BindOnce([](std::string s) {
+            [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(s)];
+          }, spec));
     }
   }
 
@@ -737,6 +770,70 @@ void EnsureDownloadObserverForProfile(Profile* profile) {
   new MoriDownloadBridge(manager);  // self-owned; lives for the process lifetime
 }
 
+// Install 1Password's native-messaging host manifest into Millie's Chromium
+// user-data dir so the 1Password extension can reach the desktop app (Touch ID
+// unlock). 1Password only writes this manifest for browsers it knows about, so
+// a custom Chromium never gets one; we stage it ourselves, pointing at the
+// installed helper. This is necessary but NOT sufficient — 1Password's
+// BrowserSupport still gates the connection on a hardcoded code-signature
+// allowlist that must include app.millie (pending an AgileBits allowlist add),
+// so this has no user-visible effect until Millie is allowlisted. Harmless
+// meanwhile: we only write when 1Password is installed and never clobber an
+// existing manifest. The file I/O is posted off the UI thread.
+void EnsureOnePasswordNativeMessagingManifest() {
+  base::FilePath user_data;
+  if (!base::PathService::Get(chrome::DIR_USER_DATA, &user_data)) {
+    return;
+  }
+  base::ThreadPool::PostTask(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      base::BindOnce(
+          [](base::FilePath user_data) {
+            const base::FilePath helper(
+                "/Applications/1Password.app/Contents/Library/LoginItems/"
+                "1Password Browser Helper.app/Contents/MacOS/"
+                "1Password-BrowserSupport");
+            if (!base::PathExists(helper)) {
+              return;  // 1Password desktop app not installed
+            }
+            const base::FilePath dir =
+                user_data.Append("NativeMessagingHosts");
+            const base::FilePath manifest =
+                dir.Append("com.1password.1password.json");
+            if (base::PathExists(manifest)) {
+              return;  // don't clobber (1Password may have written it)
+            }
+            if (!base::CreateDirectory(dir)) {
+              return;
+            }
+            static constexpr char kManifest[] =
+                "{\n"
+                "  \"name\": \"com.1password.1password\",\n"
+                "  \"description\": \"1Password BrowserSupport\",\n"
+                "  \"path\": \"/Applications/1Password.app/Contents/Library/"
+                "LoginItems/1Password Browser Helper.app/Contents/MacOS/"
+                "1Password-BrowserSupport\",\n"
+                "  \"type\": \"stdio\",\n"
+                "  \"allowed_origins\": [\n"
+                "    \"chrome-extension://"
+                "hjlinigoblmkhjejkmbegnoaljkphmgo/\",\n"
+                "    \"chrome-extension://"
+                "bkpbhnjcbehoklfkljkkbbmipaphipgl/\",\n"
+                "    \"chrome-extension://"
+                "gejiddohjgogedgjnonbofjigllpkmbf/\",\n"
+                "    \"chrome-extension://"
+                "khgocmkkpikpnmmkgmdnfckapcdkgfaf/\",\n"
+                "    \"chrome-extension://"
+                "aeblfdkhhhdcdjpifhhbdiojplfjncoa/\",\n"
+                "    \"chrome-extension://"
+                "dppgmdbiimibapkepcbdbmkaabgiofem/\"\n"
+                "  ]\n"
+                "}\n";
+            base::WriteFile(manifest, std::string_view(kManifest));
+          },
+          std::move(user_data)));
+}
+
 void OnBrowserWindowCreated(Browser* browser) {
   NSLog(@"MORI OnBrowserWindowCreated type=%d existing=%p", (int)browser->type(),
         g_mori_browser);
@@ -745,6 +842,7 @@ void OnBrowserWindowCreated(Browser* browser) {
   }
   g_mori_browser = browser;
   browser->tab_strip_model()->AddObserver(MoriTabStripObserver());
+  EnsureOnePasswordNativeMessagingManifest();
   NSLog(@"MORI adopted browser %p", browser);
 }
 
@@ -800,7 +898,16 @@ void EnsureMoriUIStarted(Browser* browser) {
   window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentMinSize = NSMakeSize(720, 480);
   window.contentViewController = [MoriRoot makeRootViewController];
-  [window center];
+  // Remember the window's size and position across launches. With an autosave
+  // name set, AppKit writes the frame to NSUserDefaults on every resize/move
+  // and restores it here; setFrameUsingName returns NO on first launch (no
+  // saved frame), where we fall back to centering the default 1280x820.
+  // AppKit's constrainFrameRect keeps a saved frame on-screen if the display
+  // setup changed since last quit.
+  [window setFrameAutosaveName:@"MillieMainWindow"];
+  if (![window setFrameUsingName:@"MillieMainWindow"]) {
+    [window center];
+  }
   [window makeKeyAndOrderFront:nil];
   [NSApp activateIgnoringOtherApps:YES];
   g_main_window = window;
@@ -1015,6 +1122,36 @@ bool OpenExternalUrls(const std::vector<GURL>& urls) {
   return true;  // Millie owns these; don't let Chrome open an unobserved window
 }
 
+bool HandleExternalProtocol(const GURL& url, bool has_user_gesture) {
+  // App-scheme links — webex://, msteams://, zoommtg://, tel:, sms:, … — that
+  // Chrome would route through LaunchURL below, which posts to a confirmation
+  // dialog Millie's non-Views chrome never presents, so the link silently does
+  // nothing from any surface (main tab, web panel, Peek, popup). Hand it to the
+  // OS's default app instead. Gated on a real user gesture so a page can't
+  // auto-launch apps; without a gesture we return false and Chrome's (inert)
+  // default path runs — no regression.
+  if (!has_user_gesture || !url.is_valid() || ![MoriRoot uiReady]) {
+    return false;
+  }
+  const std::string_view scheme = url.scheme();
+  // Web / internal / inert schemes never reach HandleExternalProtocol, but
+  // guard so only genuine app-launch schemes are ever handed to the OS.
+  static const char* const kNonExternal[] = {
+      "http", "https", "file", "about", "chrome", "chrome-extension",
+      "chrome-untrusted", "devtools", "blob", "data", "filesystem",
+      "javascript", "view-source", "ftp", "ws", "wss", "mori", "millie"};
+  for (const char* s : kNonExternal) {
+    if (scheme == s) {
+      return false;
+    }
+  }
+  NSString* spec = base::SysUTF8ToNSString(url.spec());
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [MoriRoot openExternalSchemeWithURL:spec];
+  });
+  return true;  // Millie launched it; don't run Chrome's inert dialog path
+}
+
 }  // namespace mori
 
 // ---------------------------------------------------------------------------
@@ -1082,7 +1219,7 @@ static Browser* MoriBrowserForProfileKey(NSString* profileKey) {
 // Browser, not the primary one). Falls back to the primary Browser.
 static TabStripModel* MoriModelForContents(content::WebContents* wc) {
   if (wc) {
-    if (Browser* b = chrome::FindBrowserWithTab(wc)) {
+    if (Browser* b = MoriFindBrowserWithTab(wc)) {
       return b->tab_strip_model();
     }
   }
@@ -1244,7 +1381,7 @@ Browser* ActiveBrowser() {
   // Delegate to the WebContents' own Browser (its profile). For default-profile
   // tabs this is the primary Browser (unchanged); for isolated tabs it's their
   // headless Browser, so window.open popups stay in the same Profile.
-  if (Browser* owner = chrome::FindBrowserWithTab(webContents)) {
+  if (Browser* owner = MoriFindBrowserWithTab(webContents)) {
     webContents->SetDelegate(owner);
   } else if (g_mori_browser) {
     webContents->SetDelegate(g_mori_browser);
@@ -1909,6 +2046,63 @@ Browser* ActiveBrowser() {
     renderView->Focus();
   }
   _webContents->Focus();
+}
+
+- (void)takeKeyboardFocusPreservingPage {
+  if (!_webContents || !g_mori_browser) {
+    return;
+  }
+  // Keep chrome's "active tab" in lockstep with Millie's selection.
+  TabStripModel* model = MoriModelForContents(_webContents);
+  const int index = model ? model->GetIndexOfWebContents(_webContents)
+                          : TabStripModel::kNoTab;
+  if (index != TabStripModel::kNoTab && model->active_index() != index) {
+    model->ActivateTabAt(index);
+  }
+  content::RenderWidgetHostView* renderView =
+      _webContents->GetRenderWidgetHostView();
+  NSView* rendererNativeView =
+      renderView ? renderView->GetNativeView().GetNativeNSView() : nil;
+  NSWindow* window = self.window ?: rendererNativeView.window ?: _webView.window;
+  // Route the keyboard here so ⌘C/⌘V/typing reach this web content:
+  //  1. key window + AppKit first responder (so the NSView gets the events), and
+  //  2. renderView->Focus() — focus the RenderWidgetHost at the Blink level.
+  //     This is REQUIRED: Chromium only executes editing commands (copy/paste)
+  //     on a content-focused widget, so without it ⌘C/⌘V silently no-op even
+  //     though the NSView is first responder (confirmed: clipboard changeCount
+  //     never moved on ⌘C). Focusing the *widget* restores the page's existing
+  //     focused element, so the field the user just clicked keeps its caret.
+  //  We still DON'T call _webContents->Focus(): that can reset focus to the top
+  //  frame and blur a clicked iframe field (Outlook/Gmail compose & search).
+  // No key-steal guard: this is an explicit user-initiated handback.
+  if (window && !window.isKeyWindow) {
+    [window makeKeyWindow];
+  }
+  if (rendererNativeView.window) {
+    [rendererNativeView.window makeFirstResponder:rendererNativeView];
+  }
+  if (renderView) {
+    renderView->Focus();
+  }
+}
+
+// Deterministic clipboard commands routed straight to THIS tab's WebContents.
+// content::WebContents::Copy/Cut/Paste/SelectAll act on the WebContents' own
+// focused frame regardless of which NSWindow is key or what holds AppKit first
+// responder — so ⌘C/⌘V work even when a panel (web panel child window or the
+// SwiftUI AI composer) has stolen OS focus. This is the reliable path; the
+// focus-reassert dance in routePanelClick is only needed for *typing*.
+- (void)copySelection {
+  if (_webContents) _webContents->Copy();
+}
+- (void)cutSelection {
+  if (_webContents) _webContents->Cut();
+}
+- (void)pasteClipboard {
+  if (_webContents) _webContents->Paste();
+}
+- (void)selectAllContent {
+  if (_webContents) _webContents->SelectAll();
 }
 
 - (void)setTabPinned:(BOOL)pinned {

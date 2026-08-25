@@ -217,6 +217,11 @@ bool MoriLocationBar::IsEditingOrEmpty() const {
   return false;
 }
 
+// Mori has no Views location bar / mouse tracking; hover is never reported.
+bool MoriLocationBar::IsMouseHovered() const {
+  return false;
+}
+
 void MoriLocationBar::InvalidateLayout() {}
 
 gfx::Rect MoriLocationBar::Bounds() const {

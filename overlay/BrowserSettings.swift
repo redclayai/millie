@@ -1,5 +1,21 @@
 import SwiftUI
 
+/// A Vivaldi-style web panel: a pinned site shown in the right-edge dock,
+/// hosting its own persistent web view alongside the main content.
+struct WebPanel: Identifiable, Codable, Equatable {
+    let id: UUID
+    var url: String
+    var title: String
+    var faviconURL: String?
+
+    init(id: UUID = UUID(), url: String, title: String = "", faviconURL: String? = nil) {
+        self.id = id
+        self.url = url
+        self.title = title
+        self.faviconURL = faviconURL
+    }
+}
+
 /// User-facing browser preferences. Persisted to `UserDefaults` and observed by
 /// the chrome so changes apply live. One shared instance backs the single
 /// window; views that need live updates observe it directly.
@@ -43,6 +59,12 @@ final class BrowserSettings: ObservableObject {
     /// (built from the URLhaus + Phishing.Database open feeds). No telemetry.
     @Published var safeBrowsingEnabled: Bool {
         didSet { defaults.set(safeBrowsingEnabled, forKey: Key.safeBrowsing) }
+    }
+
+    /// Set once the first-run welcome tour has been dismissed with "Don't show
+    /// this again". Gates the tour on launch; reopenable from Settings.
+    @Published var welcomeSeen: Bool {
+        didSet { defaults.set(welcomeSeen, forKey: Key.welcomeSeen) }
     }
 
     /// Enables Millie's local Codex assistant and browser automation tools.
@@ -147,6 +169,23 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(peekPinnedLinks, forKey: Key.peekPinnedLinks) }
     }
 
+    /// Vivaldi-style web panels (pinned sites in the right-edge dock).
+    @Published var webPanels: [WebPanel] {
+        didSet {
+            if let data = try? JSONEncoder().encode(webPanels) {
+                defaults.set(data, forKey: Key.webPanels)
+            }
+        }
+    }
+    /// The web-panel dock width, adjusted by its resize handle.
+    @Published var webPanelWidth: Double {
+        didSet {
+            let clamped = min(max(webPanelWidth, 260), 640)
+            if clamped != webPanelWidth { webPanelWidth = clamped; return }
+            defaults.set(webPanelWidth, forKey: Key.webPanelWidth)
+        }
+    }
+
     /// Split view: the left pane's fraction of the width (0.2…0.8). Persisted so
     /// the user's preferred split ratio survives restarts and new splits.
     @Published var splitRatio: Double {
@@ -218,6 +257,7 @@ final class BrowserSettings: ObservableObject {
         static let customEngine = "mori.customSearchTemplate"
         static let blockAds = "mori.blockAds"
         static let safeBrowsing = "mori.safeBrowsing"
+        static let welcomeSeen = "mori.welcomeSeen"
         static let aiIntegrationEnabled = "mori.aiIntegrationEnabled"
         static let sharesPageWithAI = "mori.sharesPageWithAI"
         static let assistantProvider = "mori.assistantProvider"
@@ -231,6 +271,8 @@ final class BrowserSettings: ObservableObject {
         static let splitRatio = "mori.splitRatio"
         static let tintedFolderCards = "mori.tintedFolderCards"
         static let peekPinnedLinks = "mori.peekPinnedLinks"
+        static let webPanels = "mori.webPanels"
+        static let webPanelWidth = "mori.webPanelWidth"
         static let autoArchiveHours = "mori.autoArchiveHours"
         static let tabCycleOrder = "mori.tabCycleOrder"
     }
@@ -257,6 +299,7 @@ final class BrowserSettings: ObservableObject {
             ?? "https://www.example.com/search?q={query}"
         blockAds = defaults.object(forKey: Key.blockAds) as? Bool ?? true
         safeBrowsingEnabled = defaults.object(forKey: Key.safeBrowsing) as? Bool ?? true
+        welcomeSeen = defaults.object(forKey: Key.welcomeSeen) as? Bool ?? false
         aiIntegrationEnabled = defaults.object(forKey: Key.aiIntegrationEnabled) as? Bool ?? true
         sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
         assistantProvider = AIProvider(rawValue: defaults.string(forKey: Key.assistantProvider) ?? "") ?? .codex
@@ -280,6 +323,9 @@ final class BrowserSettings: ObservableObject {
         splitRatio = defaults.object(forKey: Key.splitRatio) as? Double ?? 0.5
         tintedFolderCards = defaults.object(forKey: Key.tintedFolderCards) as? Bool ?? true
         peekPinnedLinks = defaults.object(forKey: Key.peekPinnedLinks) as? Bool ?? true
+        webPanels = (defaults.data(forKey: Key.webPanels))
+            .flatMap { try? JSONDecoder().decode([WebPanel].self, from: $0) } ?? []
+        webPanelWidth = defaults.object(forKey: Key.webPanelWidth) as? Double ?? 380
         autoArchiveHours = defaults.object(forKey: Key.autoArchiveHours) as? Int ?? 24
         // Default to Arc/Dia behavior: Ctrl+Tab walks most-recently-used tabs.
         tabCycleOrder = TabCycleOrder(rawValue: defaults.string(forKey: Key.tabCycleOrder) ?? "")

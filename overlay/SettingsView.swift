@@ -165,6 +165,15 @@ struct SettingsView: View {
                 .font(Typography.ui(Typography.base, weight: .medium))
                 .foregroundStyle(p.primary.color)
             }
+            Field(label: "Welcome tour") {
+                Button("Show welcome tour") {
+                    store.settingsVisible = false
+                    store.welcomeVisible = true
+                }
+                .buttonStyle(.plain)
+                .font(Typography.ui(Typography.base, weight: .medium))
+                .foregroundStyle(p.primary.color)
+            }
         }
     }
 

@@ -58,6 +58,13 @@ struct RootView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
+            // Vivaldi-style web panel dock, on the web-content's trailing edge.
+            if let id = store.activePanelID,
+               let panel = settings.webPanels.first(where: { $0.id == id }) {
+                WebPanelDock(store: store, panel: panel)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
             if settings.sidebarPosition == .right {
                 sidebarSlot(onLeft: false)
             }
@@ -130,6 +137,12 @@ struct RootView: View {
                 .animation(Motion.reveal, value: store.shortcutsHelpVisible)
                 .ignoresSafeArea()
         }
+        // First-run welcome tour (also reopenable from Settings).
+        .overlay {
+            WelcomeOverlay(store: store)
+                .animation(Motion.reveal, value: store.welcomeVisible)
+                .ignoresSafeArea()
+        }
         .environment(\.palette, palette)
         .preferredColorScheme(scheme)
         .background {
@@ -154,6 +167,7 @@ struct RootView: View {
         }
         .ignoresSafeArea()
         .animation(Motion.reveal, value: store.aiPanelVisible)
+        .animation(Motion.reveal, value: store.activePanelID)
         .animation(Motion.snappy, value: store.sidebarVisible)
         .animation(Motion.snappy, value: settings.sidebarPosition)
     }

@@ -6,7 +6,7 @@ import AppKit
 extension BrowserStore {
     /// Open a URL in a transient Peek overlay (Little Arc-style) without adding
     /// it to any space.
-    func peek(url rawURL: String) {
+    func peek(url rawURL: String, profileKey: String? = nil) {
         let resolved = URLInterpreter.resolve(rawURL, settings: settings)
         // about:blank is allowed: it's the initial commit of a window.open the
         // Peek will adopt, with the real navigation following inside it.
@@ -22,13 +22,29 @@ extension BrowserStore {
             return
         }
         let target = MoriURLRewriter.rewrite(resolved)
-        let tab = BrowserTab(url: target, title: "Peek")
+        // Match the peek tab's profile to the source (or active Space's), so the
+        // engine adopts the waiting orphan WebContents for window.open /
+        // target=_blank links (adoption is profile-keyed). A mismatch here left
+        // the real navigation stranded on the un-adopted orphan and showed a
+        // blank about:blank tab titled "Peek" — which then promoted blank.
+        let resolvedProfile = profileKey ?? selectedTab?.profileKey ?? activeProfileKey
+        let tab = BrowserTab(url: target, title: "Peek", profileKey: resolvedProfile)
         // New-tab links opened FROM a peek stay in the peek (Little Arc style):
         // the overlay just shows the next page instead of spawning real tabs.
-        tab.onRequestNewTab = { [weak self] u in self?.peek(url: u) }
+        tab.onRequestNewTab = { [weak self] u in self?.peek(url: u, profileKey: resolvedProfile) }
         tab.realize()
         tab.markAccessed()
-        if let existing = peekTab { existing.close() }
+        // Defer closing the previous peek to the next runloop tick. peek() can
+        // be reached synchronously from inside a TabStripModel observer
+        // (MoriTabStripBridge::OnTabStripModelChanged, fired mid-insert when a
+        // page does window.open / target=_blank). Closing a tab there calls
+        // TabStripModel::CloseWebContentsAt while the strip is still mutating,
+        // which trips Chromium's ValidateNotReentrant CHECK and hard-crashes.
+        // Dropping the reference now and closing next tick keeps the teardown
+        // outside the observer — same reason closePeek() defers its close.
+        if let existing = peekTab {
+            DispatchQueue.main.async { existing.close() }
+        }
         withAnimation(Motion.reveal) { peekTab = tab }
     }
 
@@ -58,17 +74,20 @@ extension BrowserStore {
         DispatchQueue.main.async { tab.close() }
     }
 
-    /// Promote the peeked page into a real tab in the active context. Mount it
-    /// as a real tab FIRST, then clear the overlay — so the same web view hands
-    /// off to the tab strip with no unparented gap or teardown flash.
+    /// Promote the peeked page into a real tab in the active context.
+    ///
+    /// This opens the peeked URL as a FRESH tab and closes the Peek, rather than
+    /// reparenting the Peek's live web view into the tab strip. Reparenting the
+    /// live CEF view left it rendering black in the new tab (its compositor
+    /// wouldn't repaint until the user tabbed away and back — no visibility /
+    /// resize nudge reliably forced it). A freshly-created tab always renders
+    /// (it's the same path every other tab uses); the only cost is the promoted
+    /// page reloads, which is an acceptable trade for it actually showing.
     func promotePeek() {
         guard let tab = peekTab else { return }
-        tab.onMetadataChanged = { [weak self] _ in self?.scheduleSessionSave() }
-        tabs.append(tab)
-        addToActiveContext(tab.id)
-        selectTab(tab.id)
-        peekTab = nil
-        scheduleSessionSave()
+        let url = promotableURL(for: tab)
+        closePeek()
+        focusPromotedTab(newTab(url: url, select: true))
     }
 
     /// Promote the peeked page and open it in a split beside the tab that was
@@ -76,15 +95,42 @@ extension BrowserStore {
     func promotePeekToSplit() {
         guard let tab = peekTab else { return }
         let previous = selectedTabID
-        tab.onMetadataChanged = { [weak self] _ in self?.scheduleSessionSave() }
-        tabs.append(tab)
-        addToActiveContext(tab.id)
-        selectTab(tab.id)
-        if let previous, previous != tab.id {
+        let url = promotableURL(for: tab)
+        closePeek()
+        let promoted = newTab(url: url, select: true)
+        if let previous, previous != promoted.id {
             splitWith(previous, side: .right)
         }
-        peekTab = nil
-        scheduleSessionSave()
+        focusPromotedTab(promoted)
+    }
+
+    /// After promoting a Peek, force keyboard focus onto the new tab so its
+    /// fresh CEF view actually composites (otherwise it shows blank). Two panels
+    /// each break the normal paint nudge (`focusBrowser`) differently:
+    ///   • Web panel — lives in its own child window; if it held key, focusBrowser
+    ///     refuses to steal key from another window, so re-key the main window.
+    ///   • AI panel — its SwiftUI composer holds text-input first responder, which
+    ///     suppresses the auto-focus paint nudge (and would re-steal it); release
+    ///     `aiInputFocused` so the composer resigns and the tab can take focus.
+    /// Deferred (twice) so the tab's view is mounted in the window first.
+    private func focusPromotedTab(_ tab: BrowserTab) {
+        aiInputFocused = false
+        let nudge: () -> Void = { [weak self, weak tab] in
+            guard let tab, tab.hasRealized else { return }
+            self?.aiInputFocused = false
+            let view = tab.browserView
+            view.window?.makeKeyAndOrderFront(nil)
+            view.focusBrowser()
+        }
+        DispatchQueue.main.async(execute: nudge)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: nudge)
+    }
+
+    /// The URL to open when promoting a Peek — nil (new-tab page) if the peek
+    /// never navigated past about:blank.
+    private func promotableURL(for tab: BrowserTab) -> String? {
+        let u = tab.urlString
+        return (u.isEmpty || u == "about:blank") ? nil : u
     }
 }
 

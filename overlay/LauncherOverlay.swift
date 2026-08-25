@@ -292,15 +292,15 @@ private struct LauncherView: View {
 
     private var header: some View {
         HStack(spacing: 11) {
-            Icon(name: "magnifyingglass", size: 16, weight: .medium)
+            Icon(name: "magnifyingglass", size: 20, weight: .medium)
                 .foregroundStyle(p.mutedForeground.color.opacity(0.65))
 
             if let ss = siteSearch {
                 Text(ss.name)
                     .font(Typography.ui(Typography.base, weight: .bold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
                     .background(Capsule().fill(ss.color))
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
             }
@@ -308,8 +308,8 @@ private struct LauncherView: View {
             ZStack(alignment: .leading) {
                 if query.isEmpty {
                     Text(siteSearch == nil ? "Search or Enter URL…" : "Search…")
-                        .font(Typography.ui(Typography.title))
-                        .foregroundStyle(p.mutedForeground.color.opacity(0.65))
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(p.mutedForeground.color.opacity(0.6))
                 }
                 LauncherSearchField(text: $query,
                                     focusRequest: store.launcherFocusRequest,
@@ -321,16 +321,16 @@ private struct LauncherView: View {
                                     onSubmit: commit,
                                     onTab: handleTab,
                                     onEmptyDelete: handleEmptyDelete)
-                    .frame(height: 24)
+                    .frame(height: 30)
             }
 
             Button {
                 store.dismissLauncher()
                 store.settingsVisible = true
             } label: {
-                Icon(name: "info.circle", size: 16, weight: .medium)
+                Icon(name: "info.circle", size: 18, weight: .medium)
                     .foregroundStyle(LauncherMetrics.accent)
-                    .frame(width: 26, height: 26)
+                    .frame(width: 30, height: 30)
                     .background(Circle().fill(LauncherMetrics.accent.opacity(0.14)))
             }
             .buttonStyle(.plain)
@@ -364,6 +364,17 @@ private struct LauncherView: View {
         .buttonStyle(.plain)
     }
 
+    /// The results area hugs its content — a few rows keep the panel small,
+    /// and it grows (up to the visible cap, then scrolls) as results appear
+    /// while typing. Shrinks at rest to just the recent-tabs list.
+    private var resultsHeight: CGFloat {
+        let rows = min(items.count, LauncherMetrics.visibleResultCount)
+        guard rows > 0 else { return 0 }
+        return CGFloat(rows) * LauncherMetrics.rowHeight
+            + CGFloat(rows - 1) * LauncherMetrics.rowSpacing
+            + LauncherMetrics.resultsPadding * 2
+    }
+
     private var results: some View {
         ScrollView {
             VStack(spacing: LauncherMetrics.rowSpacing) {
@@ -377,8 +388,9 @@ private struct LauncherView: View {
             .padding(.horizontal, LauncherMetrics.resultsPadding)
             .padding(.vertical, LauncherMetrics.resultsPadding)
         }
-        .frame(maxHeight: LauncherMetrics.maxResultsHeight)
+        .frame(height: resultsHeight)
         .scrollIndicators(.never)
+        .animation(Motion.snappy, value: resultsHeight)
     }
 
     private func move(_ delta: Int) {
@@ -447,16 +459,16 @@ private struct LauncherView: View {
 }
 
 private enum LauncherMetrics {
-    static let cardWidth: CGFloat = 620
+    static let cardWidth: CGFloat = 780
     static let horizontalPadding: CGFloat = 24
-    static let headerHeight: CGFloat = 52
-    static let headerPadding: CGFloat = 16
-    static let rowHeight: CGFloat = 48
-    static let rowSpacing: CGFloat = 1
-    static let resultsPadding: CGFloat = 6
-    static let rowInnerPadding: CGFloat = 10
-    static let rowCorner: CGFloat = 8
-    static let visibleResultCount = 6
+    static let headerHeight: CGFloat = 68
+    static let headerPadding: CGFloat = 22
+    static let rowHeight: CGFloat = 54
+    static let rowSpacing: CGFloat = 2
+    static let resultsPadding: CGFloat = 8
+    static let rowInnerPadding: CGFloat = 12
+    static let rowCorner: CGFloat = 10
+    static let visibleResultCount = 7
     static let maxResultsHeight: CGFloat = {
         let rows = CGFloat(visibleResultCount)
         let gaps = CGFloat(max(visibleResultCount - 1, 0))
@@ -527,11 +539,10 @@ private struct LauncherSearchField: NSViewRepresentable {
     }
 
     private static var font: NSFont {
-        if let family = FontRegistry.soehneFamily,
-           let font = NSFont(name: family, size: 15) {
-            return font
-        }
-        return .systemFont(ofSize: 15)
+        // System font at a true regular weight: the Söhne family's lightest
+        // available face still renders heavy at this size, so use the system
+        // face for a clean, light omnibox input.
+        .systemFont(ofSize: 15, weight: .regular)
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
@@ -651,10 +662,19 @@ private struct LauncherItem: Identifiable {
         // Commands (actions), matched while typing — surfaced near the top.
         out.append(contentsOf: commands(query: q, store: store))
 
-        // Open tabs first — all of them when idle, filtered while typing. In
-        // address-bar mode the current tab is the one being edited, so offering
-        // to "Switch to" it would be redundant — skip it.
-        for tab in store.tabs {
+        // Open tabs: idle is an Arc-style MRU switcher — only tabs you've
+        // actually visited (realized), most-recently-used first, capped at 4.
+        // Restored-but-never-opened tabs are excluded (they'd otherwise crowd
+        // the list with pages you never clicked). Typing matches across ALL
+        // tabs. In address-bar mode the current tab is being edited, so
+        // "Switch to" it is redundant — skip it.
+        let candidateTabs: [BrowserTab] = q.isEmpty
+            ? Array(store.tabs
+                .filter { $0.hasRealized }
+                .sorted { $0.lastAccessedAt > $1.lastAccessedAt }
+                .prefix(4))
+            : store.tabs
+        for tab in candidateTabs {
             if store.launcherEditsCurrentTab, tab.id == store.selectedTabID { continue }
             let match = q.isEmpty
                 || tab.title.lowercased().contains(q)
@@ -670,9 +690,10 @@ private struct LauncherItem: Identifiable {
                                     action: "Switch to Tab"))
         }
 
-        // Then history: recent when idle, best matches while typing.
+        // History only while typing — idle stays compact (just the 4 recent
+        // tabs). Typing brings back best-match suggestions.
         let history = q.isEmpty
-            ? Array(HistoryStore.shared.entries.prefix(8))
+            ? []
             : HistoryStore.shared.suggestions(for: q, limit: 8)
         for entry in history {
             guard seen.insert(entry.url).inserted else { continue }
@@ -702,6 +723,10 @@ private struct LauncherItem: Identifiable {
                 store.dismissLauncher(); store.startRegionCapture() },
             Cmd(title: "Capture Visible Tab", icon: "camera", keywords: "screenshot capture visible page") {
                 store.dismissLauncher(); store.captureVisibleArea() },
+            Cmd(title: "Capture Full Page", icon: "doc.viewfinder", keywords: "screenshot capture full page long scrolling") {
+                store.dismissLauncher(); store.captureFullPage() },
+            Cmd(title: "Share Page…", icon: "square.and.arrow.up", keywords: "share airdrop mail messages send") {
+                store.dismissLauncher(); store.shareCurrentPage() },
             Cmd(title: "Boost This Site", icon: "wand.and.stars", keywords: "boost custom css js") {
                 store.dismissLauncher(); store.presentBoostEditor() },
             Cmd(title: "Zap an Element", icon: "scope", keywords: "zap hide remove element") {
@@ -769,7 +794,7 @@ private struct LauncherRow: View {
                 icon
 
                 Text(item.title.isEmpty ? item.url : item.title)
-                    .font(Typography.ui(Typography.base, weight: .medium))
+                    .font(Typography.ui(15, weight: .medium))
                     .foregroundStyle(isHighlighted ? Color.white : p.foreground.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -796,19 +821,19 @@ private struct LauncherRow: View {
     @ViewBuilder private var icon: some View {
         ZStack {
             if isHighlighted {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(Color.white)
-                    .frame(width: 26, height: 26)
+                    .frame(width: 30, height: 30)
             }
             if let sys = item.iconSystemName {
-                Icon(name: sys, size: 15, weight: .medium)
+                Icon(name: sys, size: 17, weight: .medium)
                     .foregroundStyle(isHighlighted
                         ? LauncherMetrics.accent : p.foreground.color.opacity(0.85))
             } else {
-                Favicon(icon: item.faviconURL, page: item.url, size: 18)
+                Favicon(icon: item.faviconURL, page: item.url, size: 20)
             }
         }
-        .frame(width: 26, height: 26)
+        .frame(width: 30, height: 30)
     }
 
     private var trailing: some View {

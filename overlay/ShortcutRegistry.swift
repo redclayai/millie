@@ -252,6 +252,11 @@ enum MoriCommands {
 
     private static var lastHandledEvent: ShortcutEventIdentity?
 
+    /// Pasteboard change count last acknowledged with a ⌘C "Copied" toast, so a
+    /// single physical ⌘C (which can arrive via two delivery paths) only toasts
+    /// once.
+    private static var lastCopyToastChangeCount = -1
+
     /// Identity of a key chord, independent of which delivery path (AppKit
     /// monitor, Chromium pre-handler, or the CEF keyCode entry point) reported
     /// it. Used to collapse the same *physical* press into a single action even
@@ -353,6 +358,21 @@ enum MoriCommands {
         }
 
         if isTextEditingShortcut(trigger) {
+            // ⌘C: surface the same "Copied" toast the right-click Copy shows,
+            // but only when the pasteboard actually changes — so ⌘C with no
+            // selection (and ⌘A/⌘X/⌘Z) never flash a false "Copied". Chromium
+            // writes the pasteboard asynchronously after handling the copy, so
+            // sample the change count now and re-check shortly after.
+            if !trigger.isRepeat, trigger.modifiers == .command, trigger.matchesKey("c") {
+                let before = NSPasteboard.general.changeCount
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    let after = NSPasteboard.general.changeCount
+                    if after != before, after != lastCopyToastChangeCount {
+                        lastCopyToastChangeCount = after
+                        ToastCenter.shared.show("Copied", icon: "doc.on.doc", style: .success)
+                    }
+                }
+            }
             return false
         }
 
@@ -474,6 +494,14 @@ enum MoriCommands {
             },
             MoriShortcut("toggleDevTools", modifiers: [.command, .option], key: "i") {
                 $0.toggleDevTools()
+            },
+            // Chrome parity: ⌘⌥J opens DevTools (console) too.
+            MoriShortcut("jsConsole", modifiers: [.command, .option], key: "j") {
+                $0.toggleDevTools()
+            },
+            // Chrome parity: ⌃⌘F toggles full screen.
+            MoriShortcut("toggleFullScreen", modifiers: [.command, .control], key: "f") {
+                $0.toggleFullScreen()
             },
             MoriShortcut("nextTabCommandOption",
                          modifiers: [.command, .option],

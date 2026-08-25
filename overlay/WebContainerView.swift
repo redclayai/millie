@@ -86,13 +86,22 @@ struct WebContainerView: NSViewRepresentable {
             view.setPageHidden(hidden)
         }
 
-        // Keep the active browser keyboard-focused.
+        // Keep the active browser keyboard-focused — but ONLY when the selected
+        // tab actually changed. updateNSView re-runs on every published-state
+        // update (media position ticks, title changes; many/sec with a live web
+        // panel streaming). Re-firing focusBrowser each time re-asserts
+        // makeFirstResponder + WebContents::Focus() and interrupts typing/IME.
+        // Gating on a real tab switch kills that flood while keeping the full
+        // focus call (so keyboard input routes correctly) on genuine switches.
         if let active = store.selectedTab, active.hasRealized {
             active.browserView.isHidden = activeLoadFailed
             active.browserView.setWebWindowVisible(!activeLoadFailed)
+            let tabChanged = nsView.lastAutoFocusedTabID != active.id
             if store.shouldAutoFocusWebContent,
+               tabChanged,
                !activeLoadFailed,
                !Self.windowHasTextInputFocus(nsView.window) {
+                nsView.lastAutoFocusedTabID = active.id
                 DispatchQueue.main.async { [weak browserView = active.browserView,
                                             weak store,
                                             weak nsView] in
@@ -116,6 +125,12 @@ struct WebContainerView: NSViewRepresentable {
     /// Flipped container so child frames use top-left origin.
     final class ContainerView: NSView {
         override var isFlipped: Bool { true }
+
+        /// The tab id we last auto-focused. Auto-focus only re-fires when the
+        /// selected tab differs from this, so published-state churn (media
+        /// ticks from a live panel, title updates) can't re-slam focus and
+        /// interrupt typing.
+        var lastAutoFocusedTabID: UUID?
 
         /// When true, the hosted CEF subviews keep their current frame instead
         /// of tracking `bounds` — set during a sidebar resize drag so the engine

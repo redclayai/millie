@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 
 // MARK: - Model
 
@@ -109,11 +110,15 @@ extension BrowserStore {
         let window = event.window
         let locationInWindow = event.locationInWindow
         Task { @MainActor in
-            // Poll briefly: the page's contextmenu handler stashes the payload a
-            // beat after the native right-mouse-down reaches us.
+            // Poll for the page's contextmenu payload. The DOM `contextmenu`
+            // event that stashes the link/image target can land a little after
+            // the native right-mouse-down reaches us (renderer round-trip), so
+            // give it up to ~340ms. The old 100ms window was too short: the
+            // first click's payload arrived after the poll gave up and was only
+            // read by the *next* click — the "have to right-click twice" bug.
             var found: LinkImageContextTarget?
-            for _ in 0..<4 {
-                try? await Task.sleep(nanoseconds: 25_000_000)
+            for _ in 0..<17 {
+                try? await Task.sleep(nanoseconds: 20_000_000)
                 if let target = await tab.readContextMenuTarget() {
                     found = target
                     break
@@ -144,6 +149,12 @@ extension BrowserStore {
         }
         newTab(url: safeURL, select: !inBackground)
         dismissWebContextMenu()
+    }
+
+    /// Hand a non-web link (mailto:/tel:/…) to the OS's default app.
+    func ctxOpenExternal(_ url: String) {
+        dismissWebContextMenu()
+        openExternalScheme(url)
     }
 
     func ctxPeekLink(_ url: String) {
@@ -219,6 +230,14 @@ extension BrowserStore {
     func ctxGoForward() { dismissWebContextMenu(); selectedTab?.goForward() }
     func ctxReload() { dismissWebContextMenu(); selectedTab?.reload() }
 
+    /// View the current page's HTML source in a new tab (Chrome's "View Page
+    /// Source" / ⌘⌥U). Chromium renders the built-in `view-source:` scheme.
+    func ctxViewSource() {
+        dismissWebContextMenu()
+        guard let url = selectedTab?.urlString, url.hasPrefix("http") else { return }
+        newTab(url: "view-source:" + url, select: true)
+    }
+
     func ctxSearchText(_ text: String) {
         dismissWebContextMenu()
         newTab(url: BrowserSettings.shared.searchURL(for: text), select: true)
@@ -242,6 +261,65 @@ extension BrowserStore {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(string, forType: .string)
+    }
+
+    // Native-style extras — the useful items macOS's own menu offers, added to
+    // Millie's menu so a right-click feels closer to the system menu without
+    // the (Chromium) engine work to host the real native menu.
+
+    /// The web-content view + the right-click point in its coordinate space,
+    /// captured before the menu is dismissed (dismiss clears `windowPoint`).
+    private func webAnchor() -> (NSView, CGPoint)? {
+        guard let windowPoint = contextMenu?.windowPoint,
+              let view = (selectedTab?.browserView.window ?? NSApp.keyWindow)?.contentView
+        else { return nil }
+        return (view, view.convert(windowPoint, from: nil))
+    }
+
+    /// macOS "Look Up" — the dictionary/definition popover for the selection.
+    func ctxLookUp(_ text: String) {
+        let anchor = webAnchor()
+        dismissWebContextMenu()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let (view, point) = anchor else { return }
+        view.showDefinition(for: NSAttributedString(string: trimmed), at: point)
+    }
+
+    /// Speak the selection aloud (toggles off if already speaking).
+    func ctxSpeak(_ text: String) {
+        dismissWebContextMenu()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        ContextSpeech.shared.toggle(trimmed)
+    }
+
+    /// macOS Share sheet, anchored at the right-click point. `subject` is a URL
+    /// (link/page → shared as a URL) or selected text (shared as a string).
+    func ctxShare(_ subject: String) {
+        let anchor = webAnchor()
+        dismissWebContextMenu()
+        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let (view, point) = anchor else { return }
+        let items: [Any]
+        if let url = URL(string: trimmed), url.scheme != nil { items = [url] }
+        else { items = [trimmed] }
+        let picker = NSSharingServicePicker(items: items)
+        picker.show(relativeTo: NSRect(origin: point, size: .zero),
+                    of: view, preferredEdge: .minY)
+    }
+}
+
+/// Minimal speak-selection helper (macOS "Start Speaking"). Second invocation
+/// while speaking stops it, matching the system behavior.
+final class ContextSpeech {
+    static let shared = ContextSpeech()
+    private let synth = AVSpeechSynthesizer()
+    func toggle(_ text: String) {
+        if synth.isSpeaking {
+            synth.stopSpeaking(at: .immediate)
+        } else {
+            synth.speak(AVSpeechUtterance(string: text))
+        }
     }
 }
 
@@ -362,7 +440,9 @@ private struct WebContextMenuCard: View {
 
     @ViewBuilder
     private var mainItems: some View {
-        if let link = target.linkURL {
+        if let link = target.linkURL, BrowserURLPolicy.isExternalHandlerScheme(link) {
+            externalLinkItems(link)
+        } else if let link = target.linkURL {
             CtxHeader(text: target.linkText.isEmpty ? link : target.linkText)
             CtxRow(icon: "rectangle.badge.plus", title: "Open Link in New Tab") {
                 store.ctxOpenLink(link, inBackground: false)
@@ -378,6 +458,9 @@ private struct WebContextMenuCard: View {
             }
             CtxRow(icon: "link", title: "Copy Link Address") {
                 store.ctxCopy(link, message: "Link copied")
+            }
+            CtxRow(icon: "square.and.arrow.up", title: "Share Link…") {
+                store.ctxShare(link)
             }
         }
 
@@ -413,6 +496,46 @@ private struct WebContextMenuCard: View {
         }
     }
 
+    /// Items for a non-web link (mailto:/tel:/…) — mirrors what Safari/Arc show:
+    /// act via the OS default app, and copy the bare address.
+    @ViewBuilder
+    private func externalLinkItems(_ link: String) -> some View {
+        CtxHeader(text: externalDisplay(link))
+        switch BrowserURLPolicy.scheme(of: link) {
+        case "mailto":
+            CtxRow(icon: "envelope", title: "New Email") { store.ctxOpenExternal(link) }
+            CtxRow(icon: "doc.on.doc", title: "Copy Email Address") {
+                store.ctxCopy(externalAddress(link), message: "Email address copied")
+            }
+        case "tel", "facetime", "facetime-audio":
+            CtxRow(icon: "phone", title: "Call") { store.ctxOpenExternal(link) }
+            CtxRow(icon: "doc.on.doc", title: "Copy Phone Number") {
+                store.ctxCopy(externalAddress(link), message: "Phone number copied")
+            }
+        default:
+            CtxRow(icon: "arrow.up.forward.app", title: "Open in Default App") {
+                store.ctxOpenExternal(link)
+            }
+            CtxRow(icon: "link", title: "Copy Address") {
+                store.ctxCopy(link, message: "Address copied")
+            }
+        }
+    }
+
+    /// The bare address behind an external link: strips the scheme + any mailto
+    /// query and percent-decodes ("mailto:a@b.com?subject=Hi" → "a@b.com").
+    private func externalAddress(_ link: String) -> String {
+        var s = link
+        if let colon = s.firstIndex(of: ":") { s = String(s[s.index(after: colon)...]) }
+        s = s.components(separatedBy: "?").first ?? s
+        return s.removingPercentEncoding ?? s
+    }
+
+    private func externalDisplay(_ link: String) -> String {
+        let addr = externalAddress(link)
+        return addr.isEmpty ? link : addr
+    }
+
     @ViewBuilder
     private var pageItems: some View {
         if !target.selection.isEmpty {
@@ -421,6 +544,15 @@ private struct WebContextMenuCard: View {
             }
             CtxRow(icon: "magnifyingglass", title: "Search for “\(searchSnippet)”") {
                 store.ctxSearchText(target.selection)
+            }
+            CtxRow(icon: "character.book.closed", title: "Look Up “\(searchSnippet)”") {
+                store.ctxLookUp(target.selection)
+            }
+            CtxRow(icon: "speaker.wave.2", title: "Speak") {
+                store.ctxSpeak(target.selection)
+            }
+            CtxRow(icon: "square.and.arrow.up", title: "Share…") {
+                store.ctxShare(target.selection)
             }
             CtxDivider()
         }
@@ -434,6 +566,17 @@ private struct WebContextMenuCard: View {
         CtxDivider()
         CtxRow(icon: "link", title: "Copy Page Link") {
             store.ctxCopy(store.selectedTab?.urlString ?? "", message: "Link copied")
+        }
+        if store.selectedTab?.urlString.hasPrefix("http") == true {
+            CtxRow(icon: "square.and.arrow.up", title: "Share Page…") {
+                store.ctxShare(store.selectedTab?.urlString ?? "")
+            }
+        }
+        if store.selectedTab?.urlString.hasPrefix("http") == true {
+            CtxRow(icon: "chevron.left.forwardslash.chevron.right",
+                   title: "View Page Source") {
+                store.ctxViewSource()
+            }
         }
     }
 
