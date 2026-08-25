@@ -14,7 +14,7 @@ echo "==> apply_millie: copying Mori/Millie overlay (incl. thirdparty/Sparkle.fr
 mkdir -p "$SRC/chrome/browser/ui/mori"
 /usr/bin/ditto "$MILLIE/overlay" "$SRC/chrome/browser/ui/mori"
 
-echo "==> apply_millie: applying chromium-tree.patch (18 build/UI files)"
+echo "==> apply_millie: applying chromium-tree.patch (19 build/UI files, M151)"
 cd "$SRC"
 if git apply --check --reverse "$MILLIE/chromium-tree.patch" 2>/dev/null; then
   echo "    already applied — skipping."
