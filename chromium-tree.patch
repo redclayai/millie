@@ -4478,3 +4478,29 @@
  
    std::string brand_version =
        output_version_type == blink::UserAgentBrandVersionType::kFullVersion
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -71,6 +71,7 @@
+ #include "chrome/browser/tab_group_sync/tab_group_sync_service_factory.h"
+ #include "chrome/browser/task_manager/task_manager_metrics_recorder.h"
+ #include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/mori/mori_chrome_hooks.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_live_tab_context.h"
+@@ -2584,6 +2585,15 @@
+ 
+ void OpenUrlsInBrowserWithProfile(const std::vector<GURL>& urls,
+                                   Profile* profile) {
++  // Mori: route external URL opens (Choosy/Finder/other apps, plus the
++  // process-singleton handoff when a second instance is launched with a URL)
++  // into the active Space's own tab creation. Chrome's default path below opens
++  // them in an unobserved Views browser whose tab never becomes a Millie tab —
++  // the "link just flashes and nothing happens" bug. OpenExternalUrls returns
++  // true when Millie has taken ownership of the URLs.
++  if (mori::OpenExternalUrls(urls)) {
++    return;
++  }
+   if (!profile)
+     return;  // No suitable profile to open the URLs, do nothing.
+   // Prefer a regular (non-incognito) profile
