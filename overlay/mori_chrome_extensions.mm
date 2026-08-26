@@ -404,19 +404,32 @@ class MoriExtensionPopup : public extensions::ExtensionView,
     panel_ = panel;
     Reposition();
 
-    // Dismiss when the panel loses key (click elsewhere), like Chrome popups.
+    // Dismiss when the panel loses key (click elsewhere), like Chrome popups —
+    // but only once dismissal is armed (see dismiss_armed_). Before arming, a
+    // transient resign right after show reclaims key instead of closing.
+    dismiss_armed_ = false;
     resign_observer_ = [[NSNotificationCenter defaultCenter]
         addObserverForName:NSWindowDidResignKeyNotification
                     object:panel
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification* note) {
-                  MoriExtensionPopup::Shared()->Close();
+                  MoriExtensionPopup* self = MoriExtensionPopup::Shared();
+                  if (self->dismiss_armed_) {
+                    self->Close();
+                    return;
+                  }
+                  // Transient key loss during the show grace period: reclaim key
+                  // so the popup stays interactive instead of vanishing.
+                  if (self->panel_ && NSApp.isActive) {
+                    [self->panel_ makeKeyAndOrderFront:nil];
+                  }
                 }];
 
     host_->CreateRendererSoon();
   }
 
   void Close() {
+    dismiss_armed_ = false;
     if (resign_observer_) {
       [[NSNotificationCenter defaultCenter] removeObserver:resign_observer_];
       resign_observer_ = nil;
@@ -458,6 +471,13 @@ class MoriExtensionPopup : public extensions::ExtensionView,
   void OnLoaded() override {
     if (panel_) {
       [panel_ makeKeyAndOrderFront:nil];
+      // Arm close-on-resign only after the initial focus churn settles, so the
+      // popup can't be dismissed by a transient key loss during show.
+      dispatch_after(
+          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+          dispatch_get_main_queue(), ^{
+            MoriExtensionPopup::Shared()->dismiss_armed_ = true;
+          });
     }
   }
 
@@ -509,6 +529,12 @@ class MoriExtensionPopup : public extensions::ExtensionView,
   NSPanel* __strong panel_ = nil;
   id __strong resign_observer_ = nil;
   NSRect anchor_ = NSZeroRect;
+  // Close-on-resign is armed only after a short grace period once the popup is
+  // shown+key. Before that, a transient key loss (the main SwiftUI window's
+  // focus churn right after the panel appears — worse under M151) reclaims key
+  // instead of dismissing, so the popup no longer "flashes open then closes
+  // before you can type". After the grace period a genuine click-away closes it.
+  bool dismiss_armed_ = false;
 };
 
 // MARK: - Side panel hosting
