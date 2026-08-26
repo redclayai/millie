@@ -403,37 +403,68 @@ class MoriExtensionPopup : public extensions::ExtensionView,
     [panel.contentView addSubview:contents_view];
     panel_ = panel;
     Reposition();
+    // Mark the popup's WebContents visible so its renderer connects and stays
+    // alive. Without this the renderer can behave as a hidden/occluded tab and
+    // (under M151) self-terminate right after showing — the popup "flashes open
+    // then vanishes even if you click it". Peek/WebContainer do the equivalent
+    // via setWebWindowVisible/setPageHidden.
+    if (host_ && host_->host_contents()) {
+      host_->host_contents()->WasShown();
+    }
 
-    // Dismiss when the panel loses key (click elsewhere), like Chrome popups —
-    // but only once dismissal is armed (see dismiss_armed_). Before arming, a
-    // transient resign right after show reclaims key instead of closing.
-    dismiss_armed_ = false;
+    // Dismissal is DECOUPLED from key focus. In Mori the main SwiftUI window
+    // programmatically re-asserts key focus shortly after the popup shows, so
+    // closing on NSWindowDidResignKey dismissed the popup before the user could
+    // type (the "flashes open then closes even if you click it" bug). Instead:
+    //  • on resign (focus stolen programmatically) RECLAIM key so the popup
+    //    stays typeable — never close from here;
+    //  • close only on a genuine click OUTSIDE the panel, or app deactivation.
     resign_observer_ = [[NSNotificationCenter defaultCenter]
         addObserverForName:NSWindowDidResignKeyNotification
                     object:panel
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification* note) {
                   MoriExtensionPopup* self = MoriExtensionPopup::Shared();
-                  if (self->dismiss_armed_) {
-                    self->Close();
-                    return;
-                  }
-                  // Transient key loss during the show grace period: reclaim key
-                  // so the popup stays interactive instead of vanishing.
                   if (self->panel_ && NSApp.isActive) {
                     [self->panel_ makeKeyAndOrderFront:nil];
                   }
                 }];
+    // Close on a mouse-down inside OUR app but outside the panel (e.g. the user
+    // clicks the main window to dismiss). We deliberately do NOT use a global
+    // monitor or an app-deactivate observer: extensions like 1Password activate
+    // their own native app when the popup opens, which deactivates Millie and
+    // would spuriously dismiss the popup. A local monitor only fires for clicks
+    // in Millie, so it can't be tripped by another app's activation.
+    click_monitor_local_ = [NSEvent
+        addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown |
+                                              NSEventMaskRightMouseDown)
+                                     handler:^NSEvent*(NSEvent* event) {
+                                       MoriExtensionPopup* self =
+                                           MoriExtensionPopup::Shared();
+                                       if (self->panel_ &&
+                                           !NSPointInRect(NSEvent.mouseLocation,
+                                                          self->panel_.frame)) {
+                                         self->Close();
+                                       }
+                                       return event;
+                                     }];
 
     host_->CreateRendererSoon();
   }
 
-  void Close() {
-    dismiss_armed_ = false;
+  void RemoveMonitors() {
     if (resign_observer_) {
       [[NSNotificationCenter defaultCenter] removeObserver:resign_observer_];
       resign_observer_ = nil;
     }
+    if (click_monitor_local_) {
+      [NSEvent removeMonitor:click_monitor_local_];
+      click_monitor_local_ = nil;
+    }
+  }
+
+  void Close() {
+    RemoveMonitors();
     if (panel_) {
       [panel_ orderOut:nil];
       panel_ = nil;
@@ -471,13 +502,10 @@ class MoriExtensionPopup : public extensions::ExtensionView,
   void OnLoaded() override {
     if (panel_) {
       [panel_ makeKeyAndOrderFront:nil];
-      // Arm close-on-resign only after the initial focus churn settles, so the
-      // popup can't be dismissed by a transient key loss during show.
-      dispatch_after(
-          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-          dispatch_get_main_queue(), ^{
-            MoriExtensionPopup::Shared()->dismiss_armed_ = true;
-          });
+      if (host_ && host_->host_contents()) {
+        host_->host_contents()->WasShown();
+        host_->host_contents()->Focus();
+      }
     }
   }
 
@@ -485,10 +513,7 @@ class MoriExtensionPopup : public extensions::ExtensionView,
   void OnExtensionHostDestroyed(extensions::ExtensionHost* host) override {
     // The host tears itself down (e.g. the popup called window.close(), or
     // the extension was unloaded); drop the panel without re-entering reset.
-    if (resign_observer_) {
-      [[NSNotificationCenter defaultCenter] removeObserver:resign_observer_];
-      resign_observer_ = nil;
-    }
+    RemoveMonitors();
     if (panel_) {
       [panel_ orderOut:nil];
       panel_ = nil;
@@ -528,13 +553,8 @@ class MoriExtensionPopup : public extensions::ExtensionView,
   std::unique_ptr<extensions::ExtensionViewHost> host_;
   NSPanel* __strong panel_ = nil;
   id __strong resign_observer_ = nil;
+  id __strong click_monitor_local_ = nil;
   NSRect anchor_ = NSZeroRect;
-  // Close-on-resign is armed only after a short grace period once the popup is
-  // shown+key. Before that, a transient key loss (the main SwiftUI window's
-  // focus churn right after the panel appears — worse under M151) reclaims key
-  // instead of dismissing, so the popup no longer "flashes open then closes
-  // before you can type". After the grace period a genuine click-away closes it.
-  bool dismiss_armed_ = false;
 };
 
 // MARK: - Side panel hosting
