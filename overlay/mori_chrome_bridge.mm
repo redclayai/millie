@@ -2105,6 +2105,27 @@ Browser* ActiveBrowser() {
   if (_webContents) _webContents->SelectAll();
 }
 
+// Web-content undo/redo. Chromium's RenderWidgetHostViewCocoa implements
+// copy:/cut:/paste:/selectAll: but NOT undo:/redo:, so ⌘Z / ⇧⌘Z did nothing in
+// web text fields (the Edit-menu selectors reached the web view and were
+// dropped). MoriBrowserView sits above the web view in the responder chain, so
+// these fire when web content is focused and the RWHVCocoa didn't handle them —
+// while a focused omnibox / find bar / AI-composer field editor still undoes
+// natively (its field editor handles undo: first, before the chain reaches us).
+- (void)undo:(id)sender {
+  if (_webContents) _webContents->Undo();
+}
+- (void)redo:(id)sender {
+  if (_webContents) _webContents->Redo();
+}
+- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
+  SEL action = [item action];
+  if (action == @selector(undo:) || action == @selector(redo:)) {
+    return _webContents != nullptr;
+  }
+  return [self respondsToSelector:action];
+}
+
 - (void)setTabPinned:(BOOL)pinned {
   if (!_webContents || !g_mori_browser) {
     return;
