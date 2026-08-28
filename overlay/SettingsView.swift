@@ -404,7 +404,7 @@ struct SettingsView: View {
     }
 
     private static let sleepOptions: [(Int, String)] = [
-        (0, "Never"), (15, "15 minutes"), (30, "30 minutes"),
+        (0, "Never"), (15, "15 minutes"), (20, "20 minutes"), (30, "30 minutes"),
         (60, "1 hour"), (180, "3 hours"), (360, "6 hours")
     ]
     private static let archiveOptions: [(Int, String)] = [

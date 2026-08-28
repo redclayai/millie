@@ -319,7 +319,7 @@ final class BrowserSettings: ObservableObject {
             .flatMap { try? JSONDecoder().decode(GradientTheme.self, from: $0) }
             ?? .none
         autoPiP = defaults.object(forKey: Key.autoPiP) as? Bool ?? true
-        autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 60
+        autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 20
         splitRatio = defaults.object(forKey: Key.splitRatio) as? Double ?? 0.5
         tintedFolderCards = defaults.object(forKey: Key.tintedFolderCards) as? Bool ?? true
         peekPinnedLinks = defaults.object(forKey: Key.peekPinnedLinks) as? Bool ?? true
