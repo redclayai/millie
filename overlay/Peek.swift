@@ -45,7 +45,9 @@ extension BrowserStore {
         if let existing = peekTab {
             DispatchQueue.main.async { existing.close() }
         }
-        withAnimation(Motion.reveal) { peekTab = tab }
+        withAnimation(Motion.snappy) { peekTab = tab }
+        // Replenish the spare renderer for the next Peek in this Space.
+        MoriPrivacy.warmupSpareRenderer()
     }
 
     /// Peek the clipboard's URL if it holds one, else the current page — the
@@ -65,7 +67,7 @@ extension BrowserStore {
 
     func closePeek() {
         guard let tab = peekTab else { return }
-        withAnimation(Motion.reveal) { peekTab = nil }
+        withAnimation(Motion.snappy) { peekTab = nil }
         // Defer the WebContents teardown to the next runloop tick. ESC can
         // arrive *through the peek's own web view*; closing it synchronously
         // here destroys the RenderWidgetHostView mid-key-event-dispatch, which
@@ -153,7 +155,7 @@ struct PeekOverlay: View {
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
             }
         }
-        .animation(Motion.reveal, value: store.peekTab != nil)
+        .animation(Motion.snappy, value: store.peekTab != nil)
     }
 }
 

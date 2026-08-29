@@ -20,6 +20,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Delete cookies across the given Millie profile keys ("default" + each
 /// Profile's id). Each Profile is loaded if needed so its jar is reached.
+// Pre-spawn a spare renderer process for the ACTIVE Space's profile so the next
+// navigation (a Peek, or a new tab) in that Space adopts a warm process instead
+// of cold-spawning one. The content layer only auto-warms a spare for the
+// default profile, so non-default Spaces otherwise always pay the spawn cost.
++ (void)warmupSpareRenderer;
+
 + (void)clearCookiesForProfileKeys:(NSArray<NSString *> *)keys;
 
 /// Clear the HTTP cache across the given Millie profile keys.

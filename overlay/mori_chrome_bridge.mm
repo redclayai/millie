@@ -49,6 +49,7 @@
 #include "components/find_in_page/find_types.h"
 #include "content/public/browser/host_zoom_map.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/spare_render_process_host_manager.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_frame_host.h"
@@ -2413,6 +2414,12 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
     return nullptr;
   }
   return g_mori_browser->profile()->GetDefaultStoragePartition();
+}
+
++ (void)warmupSpareRenderer {
+  if (Profile* profile = mori::ActiveProfile()) {
+    content::SpareRenderProcessHostManager::Get().WarmupSpare(profile);
+  }
 }
 
 + (void)clearCookies {

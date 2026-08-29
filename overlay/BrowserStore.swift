@@ -89,7 +89,13 @@ final class BrowserStore: ObservableObject {
     /// All Profiles (Arc-style isolation identities). Always non-empty and
     /// always contains the built-in Default; many Spaces may share one profile.
     @Published var profiles: [BrowserProfile] = [.default]
-    @Published var activeContextID: BrowserContext.ID = UUID()
+    @Published var activeContextID: BrowserContext.ID = UUID() {
+        didSet {
+            // Switching Spaces changes the active Profile; warm a spare renderer
+            // for it so the next Peek / new tab in this Space loads faster.
+            if oldValue != activeContextID { MoriPrivacy.warmupSpareRenderer() }
+        }
+    }
     /// Direction of the most recent Space switch (true = moved to a later Space).
     /// Drives the sidebar's directional slide transition.
     @Published var contextSwitchForward: Bool = true
@@ -283,6 +289,9 @@ final class BrowserStore: ObservableObject {
         installExtensionCommandSmokeIfNeeded()
         startTabMaintenance()
         startMediaPolling()
+        // Keep a spare renderer warm for the active Space so the first Peek /
+        // new tab skips the cold process spawn.
+        MoriPrivacy.warmupSpareRenderer()
         // Manage-extensions pages open in the active Space (its Profile).
         ExtensionStore.shared.openURLInActiveSpace = { [weak self] url in
             self?.newTab(url: url)
