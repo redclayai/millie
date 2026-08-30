@@ -53,6 +53,7 @@
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/storage_partition.h"
 // Per-Space profile isolation: route each tab's WebContents into a per-profile
@@ -2327,6 +2328,21 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
     _webContents->WasShown();
     // Returning to the tab brings the video back inline.
     [self runMediaScriptWithUserGesture:MoriMediaCommandScript(@"pipExit", 0)];
+  }
+}
+
+- (void)kickCompositor {
+  if (!_webContents) {
+    return;
+  }
+  _webContents->WasShown();
+  if (content::RenderWidgetHostView* rwhv =
+          _webContents->GetRenderWidgetHostView()) {
+    if (content::RenderWidgetHost* rwh = rwhv->GetRenderWidgetHost()) {
+      // Re-sync size/visibility → renderer produces a fresh frame. No key focus
+      // required, so it works when the peek was opened from another app.
+      rwh->SynchronizeVisualProperties();
+    }
   }
 }
 

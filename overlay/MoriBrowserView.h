@@ -165,6 +165,11 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 /// Tell Chromium this page is (un)occluded — flips `document.hidden`, which
 /// drives throttling and the auto-PiP-on-tab-switch behavior.
 - (void)setPageHidden:(BOOL)hidden;
+// Force the renderer to produce a fresh frame WITHOUT needing key focus (unlike
+// focusBrowser, whose key-steal guard skips the paint nudge when Millie isn't
+// the active app). Used by Peek so a peek opened from another app (e.g. Mail)
+// doesn't render black until re-clicked.
+- (void)kickCompositor;
 
 /// Explicitly show/hide the native Chromium child view for this tab. This is
 /// separate from NSView.hidden because CEF keeps its own visibility state.

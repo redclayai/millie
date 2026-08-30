@@ -233,7 +233,8 @@ private struct PeekWebHost: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         let view = tab.realize()
-        if view.superview !== nsView {
+        let justMounted = view.superview !== nsView
+        if justMounted {
             view.removeFromSuperview()
             view.frame = nsView.bounds
             view.autoresizingMask = [.width, .height]
@@ -242,5 +243,16 @@ private struct PeekWebHost: NSViewRepresentable {
         view.isHidden = false
         view.setWebWindowVisible(true)
         view.setPageHidden(false)
+        if justMounted {
+            // Force the first frame. focusBrowser can't be relied on here: when
+            // the peek is opened from another app (Mail, etc.) Millie isn't key,
+            // so focusBrowser's key-steal guard skips the paint nudge and the CEF
+            // view stays black until re-clicked. kickCompositor repaints without
+            // needing focus. Two ticks cover the engine-attach race.
+            DispatchQueue.main.async { [weak view] in view?.kickCompositor() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak view] in
+                view?.kickCompositor()
+            }
+        }
     }
 }
