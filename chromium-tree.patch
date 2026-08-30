@@ -4504,3 +4504,20 @@
    if (!profile)
      return;  // No suitable profile to open the URLs, do nothing.
    // Prefer a regular (non-incognito) profile
+--- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
++++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
+@@ -827,8 +827,12 @@
+     return [_responderDelegate acceptsMouseEventsOption];
+   }
+ 
+-  // By default, only active window accepts mouse events.
+-  return AcceptMouseEvents::kWhenInActiveWindow;
++  // Mori: Millie's browser window is SwiftUI-hosted and has no BridgedContentView
++  // (which in stock Chrome returns acceptsFirstMouse:YES), so with the default
++  // kWhenInActiveWindow the FIRST click on a link in an inactive window is
++  // swallowed as an activation click and the user has to click twice. Accept
++  // clicks always (click-through), matching Chrome's effective behavior.
++  return AcceptMouseEvents::kAlways;
+ }
+ 
+ - (BOOL)acceptsFirstMouse:(NSEvent*)theEvent {
