@@ -218,12 +218,31 @@ private struct PeekCard: View {
 }
 
 /// Hosts a single transient tab's live CEF view inside the Peek card.
+/// Container for the Peek's live web view that forces a repaint after a resize
+/// (e.g. window maximize) — the CEF compositor otherwise sometimes leaves the
+/// peek blank at the new size. Debounced so a live drag kicks only on release.
+private final class PeekHostView: NSView {
+    private var repaintKick: DispatchWorkItem?
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        repaintKick?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            for sub in self.subviews where !sub.isHidden {
+                (sub as? MoriBrowserView)?.kickCompositor()
+            }
+        }
+        repaintKick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+    }
+}
+
 private struct PeekWebHost: NSViewRepresentable {
     @ObservedObject var tab: BrowserTab
     var cornerRadius: CGFloat = 0
 
     func makeNSView(context: Context) -> NSView {
-        let container = NSView()
+        let container = PeekHostView()
         container.wantsLayer = true
         container.layer?.cornerCurve = .continuous
         container.layer?.cornerRadius = cornerRadius

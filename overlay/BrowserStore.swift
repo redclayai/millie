@@ -776,13 +776,15 @@ final class BrowserStore: ObservableObject {
         let fr = NSApp.keyWindow?.firstResponder
         if fr is NSText || (fr as? NSView)?.isKind(of: NSTextView.self) == true { return event }
 
-        // Pick the target web view: the web panel if its child window is key,
-        // otherwise the main tab. Both perform the command on their own focused
-        // frame regardless of OS focus, so this always works.
+        // Pick the target web view: the web panel if it currently holds the
+        // window's first responder (both panel and main tab are now sibling web
+        // views in the ONE window), otherwise the main tab. Each performs the
+        // command on its own focused frame, so this routes correctly.
         let panelView = activePanelID.flatMap { panelTabs[$0]?.browserView }
-        let target: MoriBrowserView? =
-            (panelView != nil && NSApp.keyWindow === panelView?.window) ? panelView
-                                                                        : selectedTab?.browserView
+        let firstResponder = NSApp.keyWindow?.firstResponder as? NSView
+        let panelFocused = panelView != nil && firstResponder != nil
+            && firstResponder!.isDescendant(of: panelView!)
+        let target: MoriBrowserView? = panelFocused ? panelView : selectedTab?.browserView
         guard let web = target else { return event }
         switch key {
         case "c": web.copySelection()
@@ -795,42 +797,36 @@ final class BrowserStore: ObservableObject {
     }
 
     private func routePanelClick(_ event: NSEvent) {
-        // 1) If a web panel (child window) is open and the click landed inside
-        //    it, let the panel keep the keyboard and stop here.
-        if let id = activePanelID, let panelView = panelTabs[id]?.browserView,
-           let panelWindow = panelView.window as? PanelChildWindow {
-            let clickedInPanel = event.window === panelWindow
-                && panelView.convert(panelView.bounds, to: nil).contains(event.locationInWindow)
-            if clickedInPanel {
-                panelWindow.mayBecomeKey = true
-                panelWindow.makeKeyAndOrderFront(nil)
-                if !panelHasFocus { panelHasFocus = true }
-                panelView.focusBrowser()
-                return
-            }
-            // Click landed outside the web panel → drop its key claim.
-            panelWindow.mayBecomeKey = false
-            panelHasFocus = false
+        // The web panel and AI panel now live IN the main window (the panel web
+        // view is a sibling of the main tab's, like a split pane), so all clicks
+        // are in one window — no child-window key gymnastics. We just hand Blink
+        // content-focus to whichever web view was clicked, because opening either
+        // panel steals content-focus from the main tab (⌘C/⌘V would then no-op).
+        let window = selectedTab?.browserView.window
+        guard event.window === window else { return }
+        let hit = window?.contentView?.hitTest(event.locationInWindow)
+        func clicked(_ view: MoriBrowserView?) -> Bool {
+            guard let view else { return false }
+            return hit === view || hit?.isDescendant(of: view) == true
         }
 
-        // 2) Otherwise, if the click hit the MAIN web content, hand keyboard
-        //    focus back to the main tab so ⌘C/⌘V work. Opening EITHER panel
-        //    steals Blink content-focus from the main tab (a main-tab shortcut
-        //    then silently no-ops; right-click Copy still works since it targets
-        //    the element directly). Crucially, also resign the AI composer's
-        //    SwiftUI @FocusState — otherwise it re-grabs first responder a beat
-        //    after the click and swallows the shortcut again. Hit-test so the
-        //    toolbar / omnibox / sidebar keep their own focus; re-assert across a
-        //    few run-loop turns (each call is a no-op once the widget holds it).
-        let mainWindow = selectedTab?.browserView.window
-        guard event.window === mainWindow else { return }
-        let hit = mainWindow?.contentView?.hitTest(event.locationInWindow)
-        let clickedMainWeb: Bool = {
-            guard let web = selectedTab?.browserView else { return false }
-            return hit === web || (hit?.isDescendant(of: web) ?? false)
-        }()
-        if clickedMainWeb {
+        // 1) Clicked into the web panel → focus its content so typing/⌘V land
+        //    there, and resign the AI composer's SwiftUI @FocusState.
+        if let id = activePanelID, clicked(panelTabs[id]?.browserView) {
             if aiInputFocused { aiInputFocused = false }
+            if !panelHasFocus { panelHasFocus = true }
+            panelTabs[id]?.browserView.focusBrowser()
+            return
+        }
+
+        // 2) Clicked the MAIN web content → hand focus back to the main tab so
+        //    ⌘C/⌘V work (opening a panel stole its Blink content-focus). Also
+        //    resign the AI composer, which otherwise re-grabs first responder a
+        //    beat later and swallows the shortcut. Re-assert across a few
+        //    run-loop turns (each call is a no-op once the widget holds focus).
+        if clicked(selectedTab?.browserView) {
+            if aiInputFocused { aiInputFocused = false }
+            panelHasFocus = false
             let reassert: () -> Void = { [weak self] in
                 self?.selectedTab?.browserView.takeKeyboardFocusPreservingPage()
             }
@@ -1756,6 +1752,33 @@ final class BrowserStore: ObservableObject {
             message,
             icon: "rectangle.3.group",
             style: (closed == 0 && grouped == 0) ? .info : .success)
+    }
+
+    /// Close every tab that isn't pinned and isn't in one of your folders — the
+    /// loose tabs at the bottom of the sidebar (and any temporary tidy groups).
+    /// Pinned tabs and tabs filed in folders are kept. Same target set as Tidy,
+    /// but it closes them instead of grouping.
+    func closeLooseTabs() {
+        let context = activeContext
+        let userFoldered = Set(context.folders.filter { !$0.isTidy }
+                                              .flatMap { $0.tabIDs })
+        let toClose = context.tabIDs.filter {
+            !context.pinnedTabIDs.contains($0) && !userFoldered.contains($0)
+        }
+        guard !toClose.isEmpty else {
+            ToastCenter.shared.show("No loose tabs to close",
+                                    icon: "xmark.bin", style: .info)
+            return
+        }
+        withAnimation(Motion.snappy) {
+            for id in toClose { closeTab(id, forceRemove: true) }
+            // Never leave the Space with zero tabs.
+            if activeContext.tabIDs.isEmpty { _ = newTab(select: true) }
+        }
+        scheduleSessionSave()
+        let n = toClose.count
+        ToastCenter.shared.show("Closed \(n) loose tab\(n == 1 ? "" : "s")",
+                                icon: "xmark.bin", style: .success)
     }
 
     /// Close duplicate loose tabs (same normalized URL), keeping one per URL —

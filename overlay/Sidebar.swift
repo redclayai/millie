@@ -210,6 +210,9 @@ private struct SidebarContextMenu: View {
         Button("Tidy Tabs") {
             store.tidyTabs()
         }
+        Button("Close Tabs Not in Folders") {
+            store.closeLooseTabs()
+        }
 
         Divider()
 
@@ -1437,130 +1440,38 @@ struct WebPanelDock: View {
     }
 }
 
-/// Hosts a web panel's live CEF view inside the dock.
-/// A borderless child window that hosts a web panel's live web view. It becomes
-/// the key window ONLY when the user actually clicks the panel: BrowserStore's
-/// click router (`routePanelClick`) flips `mayBecomeKey` and makes it key on a
-/// panel click, and clears it — handing key back to the main window — on any
-/// click outside the panel. Gating key status on a real click is what stops a
-/// *playing* panel (YouTube etc.) from programmatically grabbing the key window
-/// and stealing ⌘V/typing from the main tab, while still letting you click into
-/// the panel and type there. Clicks, scrolling and media controls work
-/// regardless — mouse events don't require key status.
-final class PanelChildWindow: NSWindow {
-    /// Set true by the click router only while focus is meant to be in the
-    /// panel; false otherwise, so nothing but a user click can key it.
-    var mayBecomeKey = false
-    override var canBecomeKey: Bool { mayBecomeKey }
-    override var canBecomeMain: Bool { false }
-}
-
-/// Owns the panel's child window: hosts the web view, mirrors the placeholder's
-/// on-screen frame, and hides while a full-window overlay (launcher, Peek,
-/// settings…) is up so the floating child can't cover it.
-final class PanelWindowController {
-    let window = PanelChildWindow(contentRect: .zero,
-                                  styleMask: [.borderless],
-                                  backing: .buffered, defer: true)
-    private weak var placeholder: NSView?
-    private weak var hosted: NSView?
-    private var observers: [Any] = []
-
-    init(cornerRadius: CGFloat = 0) {
-        window.isOpaque = cornerRadius == 0
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.isReleasedWhenClosed = false
-        let content = NSView()
-        content.wantsLayer = true
-        content.layer?.cornerCurve = .continuous
-        content.layer?.cornerRadius = cornerRadius
-        content.layer?.masksToBounds = cornerRadius > 0
-        window.contentView = content
-    }
-
-    func attach(view: NSView, over placeholder: NSView, visible: Bool) {
-        self.placeholder = placeholder
-        if hosted !== view {
-            hosted?.removeFromSuperview()
-            view.frame = window.contentView?.bounds ?? .zero
-            view.autoresizingMask = [.width, .height]
-            window.contentView?.addSubview(view)
-            hosted = view
-        }
-        guard let parent = placeholder.window else { return }
-        if window.parent !== parent {
-            window.parent?.removeChildWindow(window)
-            parent.addChildWindow(window, ordered: .above)
-        }
-        installObservers(on: placeholder, parent: parent)
-        reposition()
-        setVisible(visible)
-    }
-
-    func setVisible(_ visible: Bool) {
-        if visible {
-            if !window.isVisible { window.orderFront(nil) }
-            reposition()
-        } else if window.isVisible {
-            window.orderOut(nil)
-        }
-    }
-
-    private func reposition() {
-        guard let placeholder, let parent = placeholder.window,
-              placeholder.superview != nil else { return }
-        let inWindow = placeholder.convert(placeholder.bounds, to: nil)
-        window.setFrame(parent.convertToScreen(inWindow), display: true)
-    }
-
-    private func installObservers(on placeholder: NSView, parent: NSWindow) {
-        guard observers.isEmpty else { return }
-        placeholder.postsFrameChangedNotifications = true
-        let nc = NotificationCenter.default
-        observers.append(nc.addObserver(
-            forName: NSView.frameDidChangeNotification, object: placeholder,
-            queue: .main) { [weak self] _ in self?.reposition() })
-        for name in [NSWindow.didResizeNotification, NSWindow.didMoveNotification] {
-            observers.append(nc.addObserver(forName: name, object: parent,
-                                            queue: .main) { [weak self] _ in self?.reposition() })
-        }
-    }
-
-    func teardown() {
-        observers.forEach { NotificationCenter.default.removeObserver($0) }
-        observers.removeAll()
-        hosted?.removeFromSuperview()
-        hosted = nil
-        window.parent?.removeChildWindow(window)
-        window.orderOut(nil)
-    }
-}
-
+/// Hosts a web panel's live CEF view IN the main window as a sibling web view
+/// (like a split pane) — NOT a child window. Sharing the window's single first
+/// responder and paint pipeline makes the panel behave consistently with tabs
+/// and split, and removes the whole child-window bug class (blank-on-maximize,
+/// copy/paste focus fights, paint nudges). The page keeps running like a
+/// background tab; the view is only visually hidden while a full-window overlay
+/// (Peek, settings, launcher) is up, so the AppKit web view can't punch through
+/// it. Focus/keyboard routing lives in BrowserStore (routePanelClick / routePanelKey).
 private struct WebPanelHost: NSViewRepresentable {
     @ObservedObject var tab: BrowserTab
     @ObservedObject var store: BrowserStore
 
-    func makeCoordinator() -> PanelWindowController { PanelWindowController() }
-
-    func makeNSView(context: Context) -> NSView { NSView() }
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        return container
+    }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         let view = tab.realize()
-        view.setWebWindowVisible(true)
-        view.setPageHidden(false)
-        // Host the panel web view in its own child window (not a subview of the
-        // main window), so it has a separate first-responder and can't grab the
-        // main tab's keyboard. Deferred so the placeholder is in a window first.
-        let coordinator = context.coordinator
-        let visible = !store.panelOverlayObscured
-        DispatchQueue.main.async {
-            coordinator.attach(view: view, over: nsView, visible: visible)
+        if view.superview !== nsView {
+            view.removeFromSuperview()
+            view.frame = nsView.bounds
+            view.autoresizingMask = [.width, .height]
+            nsView.addSubview(view)
         }
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: PanelWindowController) {
-        coordinator.teardown()
+        let obscured = store.panelOverlayObscured
+        view.isHidden = obscured
+        view.setWebWindowVisible(!obscured)
+        // Keep the panel's page live even when visually hidden (persistent panel,
+        // like a background tab).
+        view.setPageHidden(false)
     }
 }
 

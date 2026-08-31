@@ -182,11 +182,30 @@ struct WebContainerView: NSViewRepresentable {
             super.layout()
             guard !freezeSubviewLayout else { return }
             for sub in subviews { sub.frame = frameForSubview(sub) }
+            scheduleRepaintKick()
         }
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
             guard !freezeSubviewLayout else { return }
             for sub in subviews { sub.frame = frameForSubview(sub) }
+            scheduleRepaintKick()
+        }
+
+        /// After a window resize / maximize, the CEF compositor sometimes fails
+        /// to produce a frame at the new size and the tab renders blank (the
+        /// "blank on maximize" bug). Force visible web views to repaint once the
+        /// size settles. Debounced so a live drag-resize kicks only on release.
+        private var repaintKick: DispatchWorkItem?
+        private func scheduleRepaintKick() {
+            repaintKick?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                for sub in self.subviews where !sub.isHidden {
+                    (sub as? MoriBrowserView)?.kickCompositor()
+                }
+            }
+            repaintKick = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
         }
     }
 }
