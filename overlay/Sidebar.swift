@@ -859,6 +859,10 @@ private struct FolderRow: View {
                 .fill(showsCard ? (folderTint ?? p.primary.color).opacity(cardOpacity)
                                 : .clear)
         )
+        // Contain FolderRow's rendering in its own compositing layer so its
+        // (card wash + morphing icon + nested rows) can't disturb the paint of
+        // the sibling loose-tab rows below it in the sidebar's scroll list.
+        .compositingGroup()
         .onAppear(perform: beginRenameIfRequested)
         .onChange(of: store.folderIDPendingRename) { _, _ in
             beginRenameIfRequested()

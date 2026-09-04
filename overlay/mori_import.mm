@@ -343,9 +343,9 @@ int ImportCards(const base::FilePath& profile_dir,
         if (number.empty()) {
           continue;
         }
+        // M152: CreditCard(guid, origin) lost its origin argument.
         autofill::CreditCard card(
-            base::Uuid::GenerateRandomV4().AsLowercaseString(),
-            "https://millie.import/");
+            base::Uuid::GenerateRandomV4().AsLowercaseString());
         card.SetRawInfo(autofill::CREDIT_CARD_NAME_FULL,
                         base::UTF8ToUTF16(s.ColumnString(0)));
         int month = s.ColumnInt(1);

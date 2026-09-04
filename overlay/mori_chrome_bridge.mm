@@ -748,7 +748,7 @@ class MoriDownloadBridge : public content::DownloadManager::Observer,
 
 content::DownloadManager* MoriDownloadManager() {
   return g_mori_browser
-             ? g_mori_browser->profile()->GetDownloadManager()
+             ? g_mori_browser->GetProfile()->GetDownloadManager()
              : nullptr;
 }
 
@@ -998,7 +998,7 @@ void EnsureMoriUIStarted(Browser* browser) {
   // observed here; each isolated Space profile is observed as it's created (see
   // MoriBrowserForProfileKey), so downloads in any Space are reflected.
   if (g_mori_browser) {
-    EnsureDownloadObserverForProfile(g_mori_browser->profile());
+    EnsureDownloadObserverForProfile(g_mori_browser->GetProfile());
   }
 
   // "Millie ▸ Set as Default Browser…" in the application menu.
@@ -1168,10 +1168,10 @@ static Profile* MoriProfileFromKey(const std::string& key) {
     return nullptr;
   }
   if (key.empty() || key == "default") {
-    return g_mori_browser->profile();
+    return g_mori_browser->GetProfile();
   }
   if (key == "incognito") {
-    Profile* base_profile = g_mori_browser->profile();
+    Profile* base_profile = g_mori_browser->GetProfile();
     return base_profile
                ? base_profile->GetPrimaryOTRProfile(/*create_if_needed=*/true)
                : nullptr;
@@ -1247,7 +1247,7 @@ Profile* ActiveProfile() {
     return nullptr;
   }
   Profile* profile = MoriProfileFromKey(g_active_profile_key);
-  return profile ? profile : g_mori_browser->profile();
+  return profile ? profile : g_mori_browser->GetProfile();
 }
 
 void SetActiveProfileKey(const std::string& key) {
@@ -1346,7 +1346,7 @@ Browser* ActiveBrowser() {
   // / OAuth popups keep their window.opener instead of being replaced by a fresh
   // navigation that drops the relationship.
   {
-    Profile* wantProfile = targetBrowser->profile();
+    Profile* wantProfile = targetBrowser->GetProfile();
     content::WebContents* adopted = nullptr;
     auto claimMatching = [&](const std::string& key) {
       auto range = OrphanMap().equal_range(key);
@@ -2429,7 +2429,7 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
   if (!g_mori_browser) {
     return nullptr;
   }
-  return g_mori_browser->profile()->GetDefaultStoragePartition();
+  return g_mori_browser->GetProfile()->GetDefaultStoragePartition();
 }
 
 + (void)warmupSpareRenderer {
@@ -2461,7 +2461,7 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
   }
   for (const auto& entry : g_profile_browsers) {
     if (entry.second) {
-      entry.second->profile()
+      entry.second->GetProfile()
           ->GetDefaultStoragePartition()
           ->GetCookieManagerForBrowserProcess()
           ->FlushCookieStore(base::DoNothing());

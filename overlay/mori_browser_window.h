@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/unload_controller.h"  // UnloadController::DownloadCloseType (M152)
 #include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
 #include "chrome/browser/ui/find_bar/find_bar.h"
 #include "chrome/browser/ui/location_bar/location_bar.h"
@@ -84,6 +85,7 @@ class MoriLocationBar : public LocationBar {
   bool IsFullscreen() const override;
   bool IsEditingOrEmpty() const override;
   bool IsMouseHovered() const override;
+  bool IsFocusWithin() const override;  // Added to LocationBar in M152.
   void InvalidateLayout() override;
   gfx::Rect Bounds() const override;
   gfx::Rect BoundsInScreen() const override;
@@ -190,9 +192,9 @@ class MoriBrowserWindow : public BrowserWindow {
   std::vector<StatusBubble*> GetStatusBubbles() override;
   void UpdateTitleBar() override;
   void UpdateLoadingAnimations(bool is_visible) override;
-  void SetStarredState(bool is_starred) override;
-  bool IsTabModalPopupDeprecated() const override;
-  void SetIsTabModalPopupDeprecated( bool is_tab_modal_popup_deprecated) override;
+  void SetStarredState(bool is_starred);
+  bool IsTabModalPopupDeprecated() const;
+  void SetIsTabModalPopupDeprecated( bool is_tab_modal_popup_deprecated);
   void OnActiveTabChanged(content::WebContents* old_contents, content::WebContents* new_contents, int index, int reason) override;
   void OnTabDetached(content::WebContents* contents, bool was_active) override;
   gfx::Size GetContentsSize() const override;
@@ -228,7 +230,7 @@ class MoriBrowserWindow : public BrowserWindow {
   ShowTranslateBubbleResult ShowTranslateBubble( content::WebContents* contents, translate::TranslateStep step, const std::string& source_language, const std::string& target_language, translate::TranslateErrors error_type, bool is_user_gesture) override;
   void StartPartialTranslate(const std::string& source_language, const std::string& target_language, const std::u16string& text_selection);
   DownloadBubbleUIController* GetDownloadBubbleUIController() override;
-  void ConfirmBrowserCloseWithPendingDownloads( int download_count, Browser::DownloadCloseType dialog_type, base::OnceCallback<void(bool)> callback) override;
+  void ConfirmBrowserCloseWithPendingDownloads( int download_count, UnloadController::DownloadCloseType dialog_type, base::OnceCallback<void(bool)> callback) override;
   void ShowAppMenu() override;
   void PreHandleDragUpdate(const content::DropData& drop_data, const gfx::PointF& point) override;
   void PreHandleDragExit() override;

@@ -8,6 +8,7 @@
 
 #include "base/strings/sys_string_conversions.h"
 #include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/unload_controller.h"  // UnloadController::From / DownloadCloseType (M152)
 #include "chrome/browser/ui/mori/mori_chrome_hooks.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/profiles/profile.h"
@@ -222,6 +223,10 @@ bool MoriLocationBar::IsMouseHovered() const {
   return false;
 }
 
+bool MoriLocationBar::IsFocusWithin() const {
+  return false;
+}
+
 void MoriLocationBar::InvalidateLayout() {}
 
 gfx::Rect MoriLocationBar::Bounds() const {
@@ -262,7 +267,7 @@ MoriExclusiveAccessContext::~MoriExclusiveAccessContext() {
 }
 
 Profile* MoriExclusiveAccessContext::GetProfile() {
-  return browser_->profile();
+  return browser_->GetProfile();
 }
 
 bool MoriExclusiveAccessContext::IsFullscreen() const {
@@ -657,7 +662,7 @@ DownloadBubbleUIController* MoriBrowserWindow::GetDownloadBubbleUIController() {
   return nullptr;
 }
 
-void MoriBrowserWindow::ConfirmBrowserCloseWithPendingDownloads( int download_count, Browser::DownloadCloseType dialog_type, base::OnceCallback<void(bool)> callback) {}
+void MoriBrowserWindow::ConfirmBrowserCloseWithPendingDownloads( int download_count, UnloadController::DownloadCloseType dialog_type, base::OnceCallback<void(bool)> callback) {}
 
 void MoriBrowserWindow::ShowAppMenu() {}
 
@@ -772,7 +777,7 @@ void MoriBrowserWindow::Close() {
   // the Browser synchronously, tearing one down mid-iteration inside
   // BrowserCloseManager::CloseBrowsers() — a use-after-free that crashed on
   // quit once more than one Browser existed (per-profile windows). Delegate.
-  browser_->OnWindowClosing();
+  UnloadController::From(browser_)->OnWindowClosing();
 }
 
 bool MoriBrowserWindow::IsActive() const {

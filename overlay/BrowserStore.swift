@@ -1772,9 +1772,17 @@ final class BrowserStore: ObservableObject {
         }
         withAnimation(Motion.snappy) {
             for id in toClose { closeTab(id, forceRemove: true) }
-            // Never leave the Space with zero tabs.
-            if activeContext.tabIDs.isEmpty { _ = newTab(select: true) }
+            // Land on a fresh, selected loose tab — the clean slate users
+            // expect after clearing. Crucially this also guarantees selection
+            // never strands on a pinned/foldered tab: a stranded selection hides
+            // the new-tab affordance and lets the omnibox navigate a permanent
+            // tab instead of opening a new one ("the tab I opened has no row").
+            _ = newTab(select: true)
         }
+        // Force a clean re-diff of the sidebar after the bulk mutation, so the
+        // fresh loose tab + New Tab row always reappear even if the batched
+        // @Published changes coalesced in a way SwiftUI didn't fully pick up.
+        objectWillChange.send()
         scheduleSessionSave()
         let n = toClose.count
         ToastCenter.shared.show("Closed \(n) loose tab\(n == 1 ? "" : "s")",

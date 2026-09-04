@@ -732,12 +732,18 @@ NSString* InstallTypeString(const extensions::Extension& extension) {
     const bool pinned =
         toolbar_model && toolbar_model->IsActionPinned(extension.id());
     const GURL homepage = extensions::ManifestURL::GetHomepageURL(&extension);
+    // M152: Extension::description() lost its out-of-line definition (stale
+    // decl, undefined at link). Read the description straight from the manifest.
+    const std::string* _mori_desc_ptr =
+        extension.manifest()->FindStringPath("description");
+    const std::string _mori_desc =
+        _mori_desc_ptr ? *_mori_desc_ptr : std::string();
 
     NSMutableDictionary* info = [@{
       @"id" : base::SysUTF8ToNSString(extension.id()),
       @"name" : base::SysUTF8ToNSString(extension.name()),
       @"shortName" : base::SysUTF8ToNSString(extension.short_name()),
-      @"description" : base::SysUTF8ToNSString(extension.description()),
+      @"description" : base::SysUTF8ToNSString(_mori_desc),
       @"version" : base::SysUTF8ToNSString(extension.VersionString()),
       @"enabled" : @(entry.enabled),
       @"pinned" : @(pinned),
