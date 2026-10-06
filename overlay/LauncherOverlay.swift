@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
 import Combine
+import PDFKit
+import UniformTypeIdentifiers
 
 /// The new-tab launcher — a Spotlight-style command palette floated above the
 /// web content. Triggered by ⌘T / the sidebar's "New Tab" row instead of
@@ -182,6 +184,21 @@ private struct LauncherView: View {
     @State private var query = ""
     @State private var highlighted = 0
     @State private var siteSearch: SiteSearch?
+    /// Live keyless query suggestions (Google suggest). Owned here so it lives
+    /// for the duration of one launcher presentation and cancels cleanly.
+    @StateObject private var suggest = SuggestClient()
+    /// Live speech-to-text for the mic button; streams into `query` while active.
+    @StateObject private var dictation = SpeechDictation()
+
+    /// "Add tabs or files" selections, shown as removable chips and gathered as
+    /// Ask-Millie context on submit.
+    @State private var attachedTabIDs: [UUID] = []
+    @State private var attachedFiles: [URL] = []
+    @State private var showingAttachPicker = false
+
+    private var hasAttachments: Bool {
+        !attachedTabIDs.isEmpty || !attachedFiles.isEmpty
+    }
 
     private var items: [LauncherItem] {
         // Chip active → one canonical row; Enter and the row do the same thing.
@@ -191,19 +208,48 @@ private struct LauncherView: View {
             return [LauncherItem(id: "site-search", title: title,
                                  url: ss.url(for: query), faviconURL: nil,
                                  tabID: nil, action: "Search",
+                                 iconSystemName: "magnifyingglass",
                                  run: { commitSiteSearch() })]
         }
-        var out = LauncherItem.build(query: query, store: store)
+        var out = LauncherItem.build(query: query, store: store,
+                                     suggestions: suggestionsForCurrentQuery)
         // Keyword typed but not yet activated → offer the chip as the top row.
         if let match = SiteSearch.match(query) {
             out.insert(LauncherItem(id: "site-hint-\(match.id)",
                                     title: "Search \(match.name)",
                                     url: match.home, faviconURL: nil,
                                     tabID: nil, action: "Tab",
+                                    iconSystemName: match.id == "google" ? "magnifyingglass" : "globe",
                                     run: { activateSiteSearch(match) }),
                        at: 0)
         }
         return out
+    }
+
+    /// Suggestions, but only when they belong to the text now in the field
+    /// (a late response for a stale query is ignored by matching on the trim).
+    private var suggestionsForCurrentQuery: [String] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard suggest.activeQuery == trimmed else { return [] }
+        return suggest.suggestions
+    }
+
+    /// Inline ghost-autocomplete target: the host of the first address/site
+    /// result whose host begins with what the user has typed. `nil` disables
+    /// completion (phrases, chips, empty, paths, already-complete hosts).
+    private var inlineCompletion: String? {
+        guard siteSearch == nil else { return nil }
+        let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty, !typed.contains(" "), !typed.contains("/"),
+              !typed.contains("://") else { return nil }
+        let typedLower = typed.lowercased()
+        for item in items {
+            guard let host = item.completionHost else { continue }
+            if host.lowercased().hasPrefix(typedLower), host.count > typed.count {
+                return host
+            }
+        }
+        return nil
     }
 
     var body: some View {
@@ -235,6 +281,22 @@ private struct LauncherView: View {
         .onChange(of: query) { _, text in
             highlighted = 0
             autoActivateOnSpace(text)
+            // Fire-and-forget: debounced, cancels in flight, fails silent.
+            if siteSearch == nil {
+                suggest.request(for: text)
+            } else {
+                suggest.clear()
+            }
+        }
+        // Mirror the live dictation transcript into the search field while the
+        // mic is active, so speech drives the same query the user types into.
+        .onChange(of: dictation.transcript) { _, text in
+            guard dictation.isListening, !text.isEmpty else { return }
+            query = text
+        }
+        .onDisappear {
+            suggest.clear()
+            dictation.stop()
         }
     }
 
@@ -250,6 +312,10 @@ private struct LauncherView: View {
     private var card: some View {
         VStack(spacing: 0) {
             header
+
+            if hasAttachments {
+                attachmentChips
+            }
 
             if !items.isEmpty {
                 Rectangle()
@@ -316,11 +382,15 @@ private struct LauncherView: View {
                                     selectAllOnFocus: !store.launcherPrefill.isEmpty,
                                     foregroundColor: p.foreground.nsColor,
                                     insertionColor: p.primary.nsColor,
+                                    completionColor: p.mutedForeground.nsColor,
+                                    inlineCompletion: inlineCompletion,
                                     onMove: move,
                                     onEscape: store.dismissLauncher,
                                     onSubmit: commit,
                                     onTab: handleTab,
-                                    onEmptyDelete: handleEmptyDelete)
+                                    onEmptyDelete: handleEmptyDelete,
+                                    onAcceptInline: acceptInlineCompletion,
+                                    onAcceptInlineSubmit: acceptInlineCompletionAndOpen)
                     .frame(height: 30)
             }
 
@@ -340,28 +410,219 @@ private struct LauncherView: View {
         .frame(height: LauncherMetrics.headerHeight)
     }
 
-    /// Always-visible footer row (mirrors the reference design).
+    /// Dia-style bottom action bar: a left "Add tabs or files" pill and overflow
+    /// control, a right-side mic glyph, and a primary "Go ↵" button that fires
+    /// the current selection (identical to Enter).
     private var footer: some View {
-        Button {
-            store.dismissLauncher()
-            if let url = URL(string: "mailto:?subject=Millie%20Feedback") {
-                NSWorkspace.shared.open(url)
+        HStack(spacing: 8) {
+            // "Add tabs or files" — opens a picker of open tabs + a file chooser,
+            // staging them as Ask-Millie context.
+            Button { showingAttachPicker.toggle() } label: {
+                softPillShape {
+                    HStack(spacing: 6) {
+                        Icon(name: "plus", size: 12, weight: .semibold)
+                        Text("Add tabs or files")
+                            .font(Typography.ui(Typography.label, weight: .medium))
+                    }
+                    .foregroundStyle(hasAttachments ? LauncherMetrics.accent : p.mutedForeground.color)
+                    .padding(.horizontal, 12)
+                    .frame(height: LauncherMetrics.footerControl)
+                }
             }
-        } label: {
-            HStack(spacing: 11) {
-                Icon(name: "bubble.left.and.bubble.right", size: 15, weight: .medium)
-                    .foregroundStyle(p.mutedForeground.color)
-                    .frame(width: 26, height: 26)
-                Text("Contact the Team")
-                    .font(Typography.ui(Typography.base, weight: .medium))
-                    .foregroundStyle(p.foreground.color)
-                Spacer(minLength: 0)
+            .buttonStyle(.plain)
+            .help("Add open tabs or files as context for Ask Millie")
+            .popover(isPresented: $showingAttachPicker, arrowEdge: .top) {
+                AttachPicker(store: store,
+                             attachedTabIDs: $attachedTabIDs,
+                             attachedFiles: $attachedFiles,
+                             chooseFiles: chooseFiles)
+                    .environment(\.palette, p)
             }
-            .padding(.horizontal, LauncherMetrics.rowInnerPadding + LauncherMetrics.resultsPadding)
-            .frame(height: LauncherMetrics.rowHeight)
-            .contentShape(Rectangle())
+
+            // Overflow — opens Settings (a sensible, non-crashing destination).
+            Button {
+                store.dismissLauncher()
+                store.settingsVisible = true
+            } label: {
+                softPillShape {
+                    Icon(name: "ellipsis", size: 15, weight: .semibold)
+                        .foregroundStyle(p.mutedForeground.color)
+                        .frame(width: LauncherMetrics.footerControl,
+                               height: LauncherMetrics.footerControl)
+                }
+            }
+            .buttonStyle(.plain)
+            .help("More")
+
+            Spacer(minLength: 0)
+
+            // Mic — toggles live dictation into the search field.
+            Button { dictation.toggle() } label: {
+                softPillShape {
+                    Icon(name: dictation.isListening ? "mic.fill"
+                             : (dictation.unavailable ? "mic.slash" : "mic"),
+                         size: 15, weight: .medium)
+                        .foregroundStyle(micTint)
+                        .frame(width: LauncherMetrics.footerControl,
+                               height: LauncherMetrics.footerControl)
+                }
+            }
+            .buttonStyle(.plain)
+            .help(dictation.isListening ? "Stop dictation"
+                      : (dictation.unavailable ? "Dictation unavailable" : "Dictate"))
+
+            // Go — activates the current selection, exactly like Enter.
+            Button { commit() } label: {
+                HStack(spacing: 6) {
+                    Text("Go")
+                        .font(Typography.ui(Typography.base, weight: .semibold))
+                    Icon(name: "return", size: 12, weight: .semibold)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 15)
+                .frame(height: LauncherMetrics.footerControl + 2)
+                .background(Capsule(style: .continuous).fill(LauncherMetrics.accent))
+            }
+            .buttonStyle(.plain)
+            .help("Go")
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, LauncherMetrics.headerPadding)
+        .frame(height: LauncherMetrics.footerHeight)
+    }
+
+    /// A soft neutral pill used by the footer's secondary controls.
+    @ViewBuilder private func softPill<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        softPillShape(content)
+    }
+
+    @ViewBuilder private func softPillShape<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content()
+            .background(Capsule(style: .continuous).fill(p.foreground.color.opacity(0.05)))
+    }
+
+    private var micTint: Color {
+        if dictation.isListening { return Color(.sRGB, red: 0.90, green: 0.22, blue: 0.22, opacity: 1) }
+        if dictation.unavailable { return p.mutedForeground.color.opacity(0.6) }
+        return p.mutedForeground.color
+    }
+
+    // MARK: Attachment chips
+
+    /// Removable chips for the selected tabs and files, between the header and
+    /// the results list.
+    private var attachmentChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(attachedTabIDs, id: \.self) { id in
+                    if let tab = store.tabs.first(where: { $0.id == id }) {
+                        AttachmentChip(label: tab.displayTitle,
+                                       faviconURL: tab.faviconURL,
+                                       page: tab.displayURL,
+                                       systemIcon: nil) {
+                            attachedTabIDs.removeAll { $0 == id }
+                        }
+                    }
+                }
+                ForEach(attachedFiles, id: \.self) { url in
+                    AttachmentChip(label: url.lastPathComponent,
+                                   faviconURL: nil,
+                                   page: nil,
+                                   systemIcon: "doc") {
+                        attachedFiles.removeAll { $0 == url }
+                    }
+                }
+            }
+            .padding(.horizontal, LauncherMetrics.headerPadding)
+            .padding(.bottom, 10)
+        }
+    }
+
+    // MARK: Attachment handling
+
+    /// Open an NSOpenPanel for text / markdown / json / csv / pdf / source files.
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        let exts = ["txt", "md", "markdown", "text", "json", "csv", "pdf",
+                    "swift", "js", "ts", "tsx", "jsx", "py", "rb", "go", "rs",
+                    "java", "kt", "c", "h", "cpp", "hpp", "cc", "m", "mm", "cs",
+                    "php", "html", "css", "scss", "xml", "yaml", "yml", "toml",
+                    "ini", "sh", "sql", "r", "lua", "pl"]
+        panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
+        panel.begin { response in
+            guard response == .OK else { return }
+            for url in panel.urls where !attachedFiles.contains(url) {
+                attachedFiles.append(url)
+            }
+        }
+    }
+
+    /// Submit the typed query together with the selected tabs/files as Ask-Millie
+    /// context. Gathering is async (tab text + file reads), so it runs after the
+    /// launcher dismisses.
+    private func submitWithAttachments() {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tabs = attachedTabIDs.compactMap { id in store.tabs.first { $0.id == id } }
+        let files = attachedFiles
+        let summary = Self.attachmentSummary(tabCount: tabs.count, fileCount: files.count)
+        dictation.stop()
+        store.dismissLauncher()
+        Task { @MainActor in
+            let context = await Self.gatherContext(tabs: tabs, files: files)
+            store.askMillieWithContext(question: q, title: summary, context: context)
+        }
+    }
+
+    /// Build the labeled, budget-capped context string from the attachments.
+    private static func gatherContext(tabs: [BrowserTab], files: [URL]) async -> String {
+        let perItemCap = 6000
+        let totalCap = 16000
+        var parts: [String] = []
+        var total = 0
+        func add(_ s: String) {
+            guard total < totalCap else { return }
+            let chunk = String(s.prefix(totalCap - total))
+            parts.append(chunk)
+            total += chunk.count
+        }
+        for tab in tabs {
+            let raw = (try? await tab.evaluateJavaScript(
+                "document.body ? document.body.innerText : ''")) as? String ?? ""
+            let text = String(raw.prefix(perItemCap))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            add("Tab — \(tab.displayTitle) (\(tab.displayURL)):\n\(text)\n\n")
+        }
+        for url in files {
+            guard let raw = readFileText(url) else { continue }
+            let text = String(raw.prefix(perItemCap))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            add("File — \(url.lastPathComponent):\n\(text)\n\n")
+        }
+        return parts.joined()
+    }
+
+    /// Read a file as text: PDFs via PDFKit, everything else as UTF-8. Returns
+    /// nil for anything unreadable (skipped).
+    private static func readFileText(_ url: URL) -> String? {
+        if url.pathExtension.lowercased() == "pdf" {
+            return PDFDocument(url: url)?.string
+        }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    private static func attachmentSummary(tabCount: Int, fileCount: Int) -> String {
+        var bits: [String] = []
+        if tabCount > 0 { bits.append("\(tabCount) tab\(tabCount == 1 ? "" : "s")") }
+        if fileCount > 0 { bits.append("\(fileCount) file\(fileCount == 1 ? "" : "s")") }
+        return bits.isEmpty ? "attachments" : bits.joined(separator: " + ")
     }
 
     /// The results area hugs its content — a few rows keep the panel small,
@@ -399,6 +660,12 @@ private struct LauncherView: View {
     }
 
     private func commit() {
+        // Attachments present → route to Ask Millie with the gathered context
+        // instead of the normal open/search flow.
+        if hasAttachments {
+            submitWithAttachments()
+            return
+        }
         if siteSearch != nil {
             commitSiteSearch()
             return
@@ -408,6 +675,22 @@ private struct LauncherView: View {
         } else {
             store.launcherOpen(query)
         }
+    }
+
+    // MARK: Inline autocomplete
+
+    /// → pressed with a ghost completion showing: fold it into the query so the
+    /// field now holds the full host (completion stops re-firing because the
+    /// typed text already equals the host).
+    private func acceptInlineCompletion(_ host: String) {
+        query = host
+        highlighted = 0
+    }
+
+    /// Enter pressed with a ghost completion showing: open the completed host
+    /// directly as a URL (Spotlight/omnibox behavior).
+    private func acceptInlineCompletionAndOpen(_ host: String) {
+        store.launcherOpen(url: URLInterpreter.resolve(host, settings: store.settings))
     }
 
     // MARK: Site search (chip)
@@ -459,15 +742,18 @@ private struct LauncherView: View {
 }
 
 private enum LauncherMetrics {
-    static let cardWidth: CGFloat = 780
+    static let cardWidth: CGFloat = 720
     static let horizontalPadding: CGFloat = 24
-    static let headerHeight: CGFloat = 68
-    static let headerPadding: CGFloat = 22
-    static let rowHeight: CGFloat = 54
+    static let headerHeight: CGFloat = 64
+    static let headerPadding: CGFloat = 20
+    static let rowHeight: CGFloat = 44
     static let rowSpacing: CGFloat = 2
-    static let resultsPadding: CGFloat = 8
+    static let resultsPadding: CGFloat = 10
     static let rowInnerPadding: CGFloat = 12
     static let rowCorner: CGFloat = 10
+    /// Footer control (pill / button) height, and the bar that holds them.
+    static let footerControl: CGFloat = 30
+    static let footerHeight: CGFloat = 56
     static let visibleResultCount = 7
     static let maxResultsHeight: CGFloat = {
         let rows = CGFloat(visibleResultCount)
@@ -497,6 +783,11 @@ private struct LauncherSearchField: NSViewRepresentable {
     let selectAllOnFocus: Bool
     let foregroundColor: NSColor
     let insertionColor: NSColor
+    /// Color of the greyed inline-completion ("ghost") text.
+    var completionColor: NSColor = .secondaryLabelColor
+    /// Full host to inline-complete to (e.g. "cnn.com") when it extends `text`.
+    /// `nil` disables inline completion.
+    var inlineCompletion: String? = nil
     let onMove: (Int) -> Void
     let onEscape: () -> Void
     let onSubmit: () -> Void
@@ -504,6 +795,10 @@ private struct LauncherSearchField: NSViewRepresentable {
     var onTab: () -> Bool = { false }
     /// Backspace in an empty field — return true when handled (chip removal).
     var onEmptyDelete: () -> Bool = { false }
+    /// → pressed with a ghost completion visible: accept it into the query.
+    var onAcceptInline: (String) -> Void = { _ in }
+    /// Enter pressed with a ghost completion visible: accept + open directly.
+    var onAcceptInlineSubmit: (String) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -529,13 +824,19 @@ private struct LauncherSearchField: NSViewRepresentable {
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
-        if field.stringValue != text {
+        // Don't clobber the field while it's displaying a valid ghost completion
+        // of `text` (that string legitimately differs from `text`).
+        let showingCompletion = inlineCompletion.map {
+            field.stringValue.lowercased() == $0.lowercased()
+        } ?? false
+        if field.stringValue != text, !showingCompletion {
             field.stringValue = text
         }
         field.font = Self.font
         field.textColor = foregroundColor
         field.backgroundColor = .clear
         context.coordinator.focusIfNeeded(field)
+        context.coordinator.applyInlineCompletion(field)
     }
 
     private static var font: NSFont {
@@ -548,13 +849,20 @@ private struct LauncherSearchField: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: LauncherSearchField
         private var appliedFocusRequest: Int?
+        /// True while we're mutating the field editor programmatically to show a
+        /// ghost completion — so `controlTextDidChange` ignores that mutation.
+        private var applyingCompletion = false
+        /// Set when the user just deleted; suppresses one completion pass so a
+        /// backspace can actually remove characters instead of being re-filled.
+        private var suppressCompletion = false
 
         init(_ parent: LauncherSearchField) {
             self.parent = parent
         }
 
         func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else { return }
+            guard !applyingCompletion,
+                  let field = notification.object as? NSTextField else { return }
             parent.text = field.stringValue
         }
 
@@ -563,25 +871,116 @@ private struct LauncherSearchField: NSViewRepresentable {
                      doCommandBy commandSelector: Selector) -> Bool {
             switch commandSelector {
             case #selector(NSResponder.insertNewline(_:)):
+                // Enter accepts a visible ghost completion and opens it directly.
+                if completionSelectionPresent(textView) {
+                    parent.onAcceptInlineSubmit(textView.string)
+                    return true
+                }
                 parent.onSubmit()
                 return true
             case #selector(NSResponder.moveDown(_:)):
+                // Navigating the list dismisses the ghost so Enter targets the
+                // highlighted row, not the completion.
+                _ = dismissCompletion(textView)
                 parent.onMove(1)
                 return true
             case #selector(NSResponder.moveUp(_:)):
+                _ = dismissCompletion(textView)
                 parent.onMove(-1)
                 return true
+            case #selector(NSResponder.moveRight(_:)),
+                 #selector(NSResponder.moveToEndOfLine(_:)):
+                // → accepts the ghost completion into the query.
+                if completionSelectionPresent(textView) {
+                    let full = textView.string
+                    textView.setSelectedRange(
+                        NSRange(location: (full as NSString).length, length: 0))
+                    suppressCompletion = true
+                    parent.onAcceptInline(full)
+                    return true
+                }
+                return false
+            case #selector(NSResponder.moveLeft(_:)):
+                // ← restores the typed text (drops the ghost) rather than
+                // leaving the caret stranded inside the completion.
+                if dismissCompletion(textView) { return true }
+                return false
             case #selector(NSResponder.cancelOperation(_:)):
                 parent.onEscape()
                 return true
             case #selector(NSResponder.insertTab(_:)):
                 return parent.onTab()
             case #selector(NSResponder.deleteBackward(_:)):
-                guard textView.string.isEmpty else { return false }
-                return parent.onEmptyDelete()
+                if textView.string.isEmpty { return parent.onEmptyDelete() }
+                // User is deleting — don't re-complete on the resulting pass.
+                suppressCompletion = true
+                return false
+            case #selector(NSResponder.deleteForward(_:)):
+                suppressCompletion = true
+                return false
             default:
                 return false
             }
+        }
+
+        // MARK: Inline completion
+
+        /// Whether the field editor currently shows our trailing ghost selection
+        /// (a selection that begins exactly after the typed text and runs to the
+        /// end). Used to decide if →/Enter should accept it.
+        private func completionSelectionPresent(_ tv: NSTextView) -> Bool {
+            let sel = tv.selectedRange()
+            let typedLen = (parent.text as NSString).length
+            let total = (tv.string as NSString).length
+            return sel.length > 0
+                && sel.location == typedLen
+                && sel.location + sel.length == total
+                && total > typedLen
+        }
+
+        /// Replace the field contents with the typed text, caret at the end.
+        /// Returns true if a ghost completion was actually present.
+        @discardableResult
+        private func dismissCompletion(_ tv: NSTextView) -> Bool {
+            guard completionSelectionPresent(tv) else { return false }
+            let typed = parent.text
+            applyingCompletion = true
+            tv.string = typed
+            tv.setSelectedRange(NSRange(location: (typed as NSString).length, length: 0))
+            applyingCompletion = false
+            suppressCompletion = true
+            return true
+        }
+
+        /// Apply the inline ghost completion to the field, if one is available
+        /// and the field currently shows exactly the typed text with the caret
+        /// at the end. Idempotent and safe to call on every update pass.
+        func applyInlineCompletion(_ field: NSTextField) {
+            if suppressCompletion { suppressCompletion = false; return }
+            guard let comp = parent.inlineCompletion,
+                  let editor = field.currentEditor() as? NSTextView else { return }
+            let typed = parent.text
+            let typedLen = (typed as NSString).length
+            guard typedLen > 0,
+                  (comp as NSString).length > typedLen,
+                  comp.lowercased().hasPrefix(typed.lowercased()),
+                  editor.string == typed else { return }
+            let sel = editor.selectedRange()
+            guard sel.length == 0, sel.location == typedLen else { return }
+
+            // Preserve the user's typed casing, append the remaining host chars.
+            let suffix = String(comp.dropFirst(typed.count))
+            let display = typed + suffix
+            applyingCompletion = true
+            editor.string = display
+            editor.selectedTextAttributes = [
+                .backgroundColor: parent.completionColor.withAlphaComponent(0.18),
+                .foregroundColor: parent.completionColor
+            ]
+            editor.setSelectedRange(
+                NSRange(location: typedLen, length: (display as NSString).length - typedLen))
+            applyInsertionColor(field)
+            applyingCompletion = false
         }
 
         func focusIfNeeded(_ field: NSTextField) {
@@ -633,13 +1032,38 @@ private struct LauncherItem: Identifiable {
     let tabID: BrowserTab.ID?
     /// Trailing affordance label ("Switch to Tab", "Open", "Search").
     let action: String
-    /// For command results: the SF Symbol to show in place of a favicon.
+    /// For command/search results: the SF Symbol to show in place of a favicon.
     var iconSystemName: String? = nil
+    /// Muted trailing host/subtitle ("cnn.com", "cnn.co…/path"), nil to hide.
+    var subtitle: String? = nil
     /// For command results: the action to run on activation. Command closures
     /// dismiss the launcher themselves.
     var run: (() -> Void)? = nil
 
-    static func build(query: String, store: BrowserStore) -> [LauncherItem] {
+    /// The bare host this row could inline-complete to (addressy rows only).
+    /// `nil` for commands, search suggestions, and deep links (with a path).
+    var completionHost: String? {
+        // Site predictions carry the domain as their title.
+        if id.hasPrefix("site-") { return title }
+        guard iconSystemName == nil,
+              let comps = URLComponents(string: url),
+              let host = comps.host,
+              comps.path.isEmpty || comps.path == "/" else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    /// Pretty "host + path" for the trailing subtitle; scheme and "www." are
+    /// dropped and a bare "/" path is omitted.
+    static func prettyURL(_ raw: String) -> String? {
+        guard let comps = URLComponents(string: raw), let host = comps.host else { return nil }
+        let h = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        let path = comps.path
+        return (path.isEmpty || path == "/") ? h : h + path
+    }
+
+    static func build(query: String,
+                      store: BrowserStore,
+                      suggestions: [String] = []) -> [LauncherItem] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let rawQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var seen = Set<String>()
@@ -652,11 +1076,13 @@ private struct LauncherItem: Identifiable {
             // Stable id (not keyed on the resolved URL) so the row persists
             // across keystrokes instead of being torn down on every character.
             out.append(LauncherItem(id: isAddress ? "direct-address" : "direct-search",
-                                    title: isAddress ? "Open \(rawQuery)" : "Search \(rawQuery)",
+                                    title: isAddress ? rawQuery : rawQuery,
                                     url: resolved,
                                     faviconURL: nil,
                                     tabID: nil,
-                                    action: isAddress ? "Open" : "Search"))
+                                    action: isAddress ? "Open" : "Search",
+                                    iconSystemName: isAddress ? nil : "magnifyingglass",
+                                    subtitle: nil))
         }
 
         // Commands (actions), matched while typing — surfaced near the top.
@@ -687,7 +1113,8 @@ private struct LauncherItem: Identifiable {
                                     url: tab.displayURL,
                                     faviconURL: tab.faviconURL,
                                     tabID: tab.id,
-                                    action: "Switch to Tab"))
+                                    action: "Switch to Tab",
+                                    subtitle: prettyURL(tab.displayURL)))
         }
 
         // History only while typing — idle stays compact (just the 4 recent
@@ -702,7 +1129,46 @@ private struct LauncherItem: Identifiable {
                                     url: entry.url,
                                     faviconURL: nil,
                                     tabID: nil,
-                                    action: "Open"))
+                                    action: "Open",
+                                    subtitle: prettyURL(entry.url)))
+        }
+
+        // Site prediction: guess likely domains from a curated top-sites list
+        // (e.g. "cn" → cnn.com, cnbc.com…), so the type-ahead predicts sites
+        // you've never visited — not just history. Ranked here, below your own
+        // history/tabs, so real signal wins; these only fill open slots.
+        if !q.isEmpty {
+            for domain in TopDomains.matches(for: q, limit: 6) {
+                let url = "https://\(domain)"
+                guard seen.insert(url).inserted else { continue }
+                out.append(LauncherItem(id: "site-\(domain)",
+                                        title: domain,
+                                        url: url,
+                                        faviconURL: nil,
+                                        tabID: nil,
+                                        action: "Open"))
+            }
+        }
+
+        // Live search suggestions (keyless Google suggest). Ranked last so a
+        // user's own history/tabs and strong site matches win; these fill the
+        // remaining slots up to the overall cap.
+        if !rawQuery.isEmpty {
+            let rawLower = rawQuery.lowercased()
+            for suggestion in suggestions {
+                let s = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !s.isEmpty, s.lowercased() != rawLower else { continue }
+                let key = "suggest:\(s.lowercased())"
+                guard seen.insert(key).inserted else { continue }
+                out.append(LauncherItem(id: key,
+                                        title: s,
+                                        url: store.settings.searchURL(for: s),
+                                        faviconURL: nil,
+                                        tabID: nil,
+                                        action: "Search",
+                                        iconSystemName: "magnifyingglass",
+                                        subtitle: nil))
+            }
         }
 
         return Array(out.prefix(8))
@@ -780,79 +1246,185 @@ private struct LauncherRow: View {
     let action: () -> Void
 
     @Environment(\.palette) private var p
-    @State private var hovering = false
-
-    /// Tab rows advertise "Switch to Tab" at all times (dimmed at rest);
-    /// open/search rows only reveal their affordance once active.
-    private var showsAction: Bool {
-        item.tabID != nil || isHighlighted || hovering
-    }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
+            HStack(spacing: 12) {
                 icon
 
                 Text(item.title.isEmpty ? item.url : item.title)
                     .font(Typography.ui(15, weight: .medium))
-                    .foregroundStyle(isHighlighted ? Color.white : p.foreground.color)
+                    .foregroundStyle(p.foreground.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .layoutPriority(1)
 
                 Spacer(minLength: 12)
 
-                if showsAction { trailing }
+                if let sub = item.subtitle, !sub.isEmpty {
+                    HStack(spacing: 5) {
+                        Text("—")
+                            .foregroundStyle(p.mutedForeground.color.opacity(0.45))
+                        Text(sub)
+                            .foregroundStyle(p.mutedForeground.color.opacity(0.75))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .font(Typography.ui(Typography.base, weight: .regular))
+                    .frame(maxWidth: 280, alignment: .trailing)
+                    .layoutPriority(0)
+                }
             }
             .padding(.horizontal, LauncherMetrics.rowInnerPadding)
             .frame(height: LauncherMetrics.rowHeight)
             .background(
                 RoundedRectangle(cornerRadius: LauncherMetrics.rowCorner, style: .continuous)
-                    .fill(isHighlighted ? LauncherMetrics.accent : .clear)
+                    .fill(isHighlighted ? LauncherMetrics.highlightFill(scheme) : .clear)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
         .animation(Motion.state, value: isHighlighted)
     }
 
-    /// Leading glyph: a command's SF symbol or the page favicon. On the
-    /// highlighted (blue) row it sits on a white tile so dark marks stay legible.
+    /// Leading glyph (20pt): a command/search SF symbol, or the page favicon
+    /// (which falls back to a globe for sites without a decoded icon).
     @ViewBuilder private var icon: some View {
-        ZStack {
-            if isHighlighted {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.white)
-                    .frame(width: 30, height: 30)
-            }
+        Group {
             if let sys = item.iconSystemName {
-                Icon(name: sys, size: 17, weight: .medium)
-                    .foregroundStyle(isHighlighted
-                        ? LauncherMetrics.accent : p.foreground.color.opacity(0.85))
+                Icon(name: sys, size: 18, weight: .medium)
+                    .foregroundStyle(p.mutedForeground.color)
             } else {
                 Favicon(icon: item.faviconURL, page: item.url, size: 20)
             }
         }
-        .frame(width: 30, height: 30)
+        .frame(width: 24, height: 24)
+    }
+}
+
+// MARK: - Attachment picker + chips
+
+/// Popover for "Add tabs or files": a multi-select list of open tabs plus a
+/// file chooser. Selections flow back through the bound arrays and render as
+/// chips in the launcher.
+private struct AttachPicker: View {
+    @ObservedObject var store: BrowserStore
+    @Binding var attachedTabIDs: [UUID]
+    @Binding var attachedFiles: [URL]
+    let chooseFiles: () -> Void
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Add context")
+                .font(Typography.ui(13, weight: .semibold))
+                .foregroundStyle(p.popoverForeground.color)
+
+            if store.tabs.isEmpty {
+                Text("No open tabs")
+                    .font(Typography.ui(Typography.base))
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(store.tabs) { tab in
+                            tabRow(tab)
+                        }
+                    }
+                }
+                .frame(maxHeight: 240)
+            }
+
+            Divider().opacity(0.5)
+
+            Button(action: chooseFiles) {
+                HStack(spacing: 7) {
+                    Icon(name: "folder", size: 14, weight: .medium)
+                    Text("Choose files…")
+                        .font(Typography.ui(Typography.base, weight: .medium))
+                }
+                .foregroundStyle(p.foreground.color)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .frame(width: 300)
+        .background(p.popover.color)
     }
 
-    private var trailing: some View {
-        HStack(spacing: 7) {
-            Text(item.action)
-                .font(Typography.ui(Typography.small, weight: .medium))
-                .foregroundStyle(isHighlighted ? Color.white
-                                                : p.mutedForeground.color.opacity(0.7))
-
-            Icon(name: "arrow.right", size: 11, weight: .semibold)
-                .foregroundStyle(isHighlighted ? Color.white
-                                               : p.mutedForeground.color.opacity(0.7))
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
-                        .fill(isHighlighted ? Color.white.opacity(0.22)
-                                            : p.foreground.color.opacity(0.07))
-                )
+    @ViewBuilder private func tabRow(_ tab: BrowserTab) -> some View {
+        let selected = attachedTabIDs.contains(tab.id)
+        Button {
+            if selected {
+                attachedTabIDs.removeAll { $0 == tab.id }
+            } else {
+                attachedTabIDs.append(tab.id)
+            }
+        } label: {
+            HStack(spacing: 9) {
+                Favicon(icon: tab.faviconURL, page: tab.displayURL, size: 16)
+                    .frame(width: 18, height: 18)
+                Text(tab.displayTitle)
+                    .font(Typography.ui(Typography.base))
+                    .foregroundStyle(p.popoverForeground.color)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Icon(name: selected ? "checkmark.circle.fill" : "circle",
+                     size: 15, weight: .medium)
+                    .foregroundStyle(selected ? LauncherMetrics.accent
+                                              : p.mutedForeground.color.opacity(0.5))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
+                    .fill(selected ? LauncherMetrics.accent.opacity(0.08) : .clear)
+            )
         }
-        .fixedSize()
+        .buttonStyle(.plain)
+    }
+}
+
+/// A compact removable chip for one attached tab or file.
+private struct AttachmentChip: View {
+    let label: String
+    let faviconURL: String?
+    let page: String?
+    let systemIcon: String?
+    let onRemove: () -> Void
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if let systemIcon {
+                Icon(name: systemIcon, size: 11, weight: .medium)
+                    .foregroundStyle(p.mutedForeground.color)
+            } else {
+                Favicon(icon: faviconURL, page: page ?? "", size: 13)
+                    .frame(width: 13, height: 13)
+            }
+            Text(label)
+                .font(Typography.ui(Typography.label, weight: .medium))
+                .foregroundStyle(p.foreground.color)
+                .lineLimit(1)
+                .frame(maxWidth: 140)
+            Button(action: onRemove) {
+                Icon(name: "xmark", size: 9, weight: .bold)
+                    .foregroundStyle(p.mutedForeground.color)
+                    .padding(2)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 5)
+        .padding(.vertical, 5)
+        .background(Capsule(style: .continuous).fill(p.foreground.color.opacity(0.06)))
+        .overlay(Capsule().strokeBorder(p.border.color.opacity(0.4), lineWidth: 1))
     }
 }

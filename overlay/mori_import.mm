@@ -1,5 +1,10 @@
 // Millie "Import from your old browser". See mori_import.h.
 
+#ifdef UNSAFE_BUFFERS_BUILD
+#pragma allow_unsafe_buffers
+#pragma allow_unsafe_libc_calls
+#endif
+
 #import "chrome/browser/ui/mori/mori_import.h"
 
 #import <CommonCrypto/CommonCrypto.h>
@@ -241,7 +246,7 @@ int ImportPasswords(const base::FilePath& profile_dir,
         cred.signon_realm = s.ColumnString(3);
         cred.url = GURL(origin);
         cred.username_value = base::UTF8ToUTF16(s.ColumnString(1));
-        cred.password_value = base::UTF8ToUTF16(password);
+        cred.password_value = password_manager::PasswordString(base::UTF8ToUTF16(password));
         cred.date_created = TimeFromChrome(s.ColumnInt64(4));
         cred.blocked_by_user = blocked;
         cred.in_store = password_manager::PasswordForm::Store::kProfileStore;

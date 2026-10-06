@@ -1,5 +1,10 @@
 // Millie built-in ad/tracker blocker. See mori_adblock.h.
 
+#ifdef UNSAFE_BUFFERS_BUILD
+#pragma allow_unsafe_buffers
+#pragma allow_unsafe_libc_calls
+#endif
+
 #import <Foundation/Foundation.h>
 
 #include <algorithm>

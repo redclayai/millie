@@ -28,13 +28,18 @@ struct RootView: View {
         let activeTab = store.selectedTab ?? store.tabs.first
 
         HStack(spacing: 0) {
-            if settings.sidebarPosition == .left {
+            // In video fullscreen, hide ALL chrome (sidebar, panels, top strip) so
+            // the web view is the only full-window layer — a sidebar/panel/overlay
+            // layer beside or over the content stops macOS from promoting the
+            // <video> to a hardware overlay plane (choppy fullscreen, worse on
+            // ultrawide). This is what Dia/Arc do in fullscreen.
+            if settings.sidebarPosition == .left && !store.isFullscreen {
                 sidebarSlot(onLeft: true)
             }
 
             // AI panel opens on the side opposite the tab sidebar: when the
             // sidebar sits on the right, the AI panel slides in from the left.
-            if store.aiPanelVisible, settings.aiIntegrationEnabled, settings.sidebarPosition == .right {
+            if store.aiPanelVisible, settings.aiIntegrationEnabled, settings.sidebarPosition == .right, !store.isFullscreen {
                 AIPanel(store: store)
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
@@ -42,47 +47,55 @@ struct RootView: View {
             // Web content column — the toolbar chrome plus a floating, rounded
             // "card" that encapsulates the live browser, Arc-style.
             VStack(spacing: 0) {
-                WebTopStrip(tab: activeTab)
+                if !store.isFullscreen { WebTopStrip(tab: activeTab) }
                 webCard(activeTab: activeTab)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // AI panel on the right, when the sidebar sits on the left.
-            if store.aiPanelVisible, settings.aiIntegrationEnabled, settings.sidebarPosition == .left {
+            if store.aiPanelVisible, settings.aiIntegrationEnabled, settings.sidebarPosition == .left, !store.isFullscreen {
                 AIPanel(store: store)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            if extensionStore.sidePanelExtensionID != nil {
+            if extensionStore.sidePanelExtensionID != nil, !store.isFullscreen {
                 ExtensionSidePanel()
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
             // Vivaldi-style web panel dock, on the web-content's trailing edge.
             if let id = store.activePanelID,
-               let panel = settings.webPanels.first(where: { $0.id == id }) {
+               let panel = settings.webPanels.first(where: { $0.id == id }),
+               !store.isFullscreen {
                 WebPanelDock(store: store, panel: panel)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            if settings.sidebarPosition == .right {
+            if settings.sidebarPosition == .right && !store.isFullscreen {
                 sidebarSlot(onLeft: false)
             }
         }
         // Hover-to-peek sidebar — full-window overlay above the web view,
         // anchored to the selected sidebar edge, live only while hidden.
         .overlay {
-            SidebarPeekOverlay(store: store, palette: palette, scheme: scheme,
-                               gradientTheme: gradientTheme,
-                               enabled: !store.sidebarVisible,
-                               sidebarPosition: settings.sidebarPosition)
-                .ignoresSafeArea()
+            // Omitted entirely in video fullscreen: this NSView sits over the
+            // whole window even when disabled, blocking <video> overlay promotion.
+            if !store.isFullscreen {
+                SidebarPeekOverlay(store: store, palette: palette, scheme: scheme,
+                                   gradientTheme: gradientTheme,
+                                   enabled: !store.sidebarVisible,
+                                   sidebarPosition: settings.sidebarPosition)
+                    .ignoresSafeArea()
+            }
         }
         // New-tab launcher (command palette) — full-window overlay so it centers
         // relative to the entire app window, not just the web card.
         .overlay {
-            LauncherOverlay(store: store, palette: palette, scheme: scheme)
-                .ignoresSafeArea()
+            // Also an always-present NSView; drop it in fullscreen (same reason).
+            if !store.isFullscreen {
+                LauncherOverlay(store: store, palette: palette, scheme: scheme)
+                    .ignoresSafeArea()
+            }
         }
         // Ctrl+Tab preview switcher HUD (mirrors the in-progress MRU cycle).
         .overlay {
@@ -112,8 +125,12 @@ struct RootView: View {
         }
         // Screenshot region selector (AppKit-hosted, above the web view).
         .overlay {
-            CaptureOverlay(store: store)
-                .ignoresSafeArea()
+            // Always-present NSView; drop it in fullscreen so the <video> can
+            // promote to a hardware overlay plane.
+            if !store.isFullscreen {
+                CaptureOverlay(store: store)
+                    .ignoresSafeArea()
+            }
         }
         // Site permission requests — notification-style, non-modal chrome that
         // still reports Allow / Block / Not Now back to Chromium.
@@ -198,7 +215,7 @@ struct RootView: View {
             if let activeTab {
                 ActiveWebContent(store: store,
                                  tab: activeTab,
-                                 cornerRadius: Radius.window)
+                                 cornerRadius: store.isFullscreen ? 0 : Radius.window)
             }
 
             // Settings renders as a full page inside the card, on top of the
@@ -234,10 +251,14 @@ struct RootView: View {
                     .animation(Motion.state, value: activeTab.isLoading)
             }
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.window, style: .continuous)
-                .strokeBorder(palette.border.color.opacity(0.7), lineWidth: 1)
-        )
+        .overlay {
+            // No border in video fullscreen: a stroked overlay layer over the
+            // web content blocks hardware-overlay promotion of the <video>.
+            if !store.isFullscreen {
+                RoundedRectangle(cornerRadius: Radius.window, style: .continuous)
+                    .strokeBorder(palette.border.color.opacity(0.7), lineWidth: 1)
+            }
+        }
         // Zen-style split: drag a sidebar tab over the card to split it.
         .overlay {
             if let side = splitDropSide {
@@ -292,10 +313,13 @@ struct RootView: View {
                                             hoverSide: $splitDropSide,
                                             width: webCardWidth))
         .animation(Motion.snappy, value: splitDropSide != nil)
-        .padding(.top, 4)
-        .padding(.leading, 8)
-        .padding(.trailing, 8)
-        .padding(.bottom, 8)
+        // Full-bleed in video fullscreen so the web view fills the window with no
+        // surrounding card — insets leave the <video> as an inset sublayer, which
+        // keeps macOS from cleanly promoting it to a hardware overlay plane.
+        .padding(.top, store.isFullscreen ? 0 : 4)
+        .padding(.leading, store.isFullscreen ? 0 : 8)
+        .padding(.trailing, store.isFullscreen ? 0 : 8)
+        .padding(.bottom, store.isFullscreen ? 0 : 8)
     }
 }
 

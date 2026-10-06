@@ -72,6 +72,10 @@ final class CodexBrowserAssistant: ObservableObject {
     private var pendingAssistantText = ""
     private var turnWatchdogTask: Task<Void, Never>?
     private var settingsMirror: AnyCancellable?
+    /// Launcher-attached context (selected tabs/files) to carry on the NEXT turn,
+    /// then clear. For cloud providers it becomes the page title/text passed to
+    /// `MillyAIClient.ask`; for local Codex it is appended to the prompt.
+    private var stagedContext: (title: String, text: String)?
 
     init(store: BrowserStore) {
         self.store = store
@@ -189,6 +193,21 @@ final class CodexBrowserAssistant: ObservableObject {
         }
     }
 
+    /// Stage launcher attachment context for the next turn without sending. Used
+    /// for the empty-query case (the composer is focused and the user types their
+    /// question, which then carries this context).
+    func stageContext(title: String, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        stagedContext = (title, trimmed)
+    }
+
+    /// Stage attachment context and immediately send `question` as one turn.
+    func sendWithContext(_ question: String, title: String, text: String) {
+        stageContext(title: title, text: text)
+        send(question)
+    }
+
     func send(_ rawText: String) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isWorking else { return }
@@ -215,12 +234,17 @@ final class CodexBrowserAssistant: ObservableObject {
         isWorking = true
         statusText = "Starting Codex"
 
+        // Consume any launcher-staged attachment context for this turn; Codex has
+        // no page-text parameter, so it rides along inside the prompt.
+        let staged = stagedContext
+        stagedContext = nil
+
         Task { @MainActor in
             do {
                 let threadId = try await ensureThread()
                 fallbackToolIterations = 0
                 pendingAssistantText = ""
-                let prompt = try await promptForUserRequest(text)
+                let prompt = try await promptForUserRequest(text, attachments: staged?.text)
                 try await startTurn(threadId: threadId, prompt: prompt)
             } catch {
                 replaceActiveAssistantText("I couldn't reach the local Codex app server: \(error.localizedDescription)")
@@ -253,8 +277,18 @@ final class CodexBrowserAssistant: ObservableObject {
             .filter { $0.role != .tool }
             .map { MillyAIClient.Turn(role: $0.role == .user ? "user" : "assistant", text: $0.text) }
 
+        // Consume any launcher-staged attachment context for this turn; it
+        // replaces the live page context as the question's grounding.
+        let staged = stagedContext
+        stagedContext = nil
+
         Task { @MainActor in
-            let (title, page) = await currentPageContext()
+            let (title, page): (String, String)
+            if let staged {
+                (title, page) = (staged.title, staged.text)
+            } else {
+                (title, page) = await currentPageContext()
+            }
             do {
                 let answer = try await MillyAIClient.shared.ask(
                     question: text, pageTitle: title, pageText: page, history: Array(history))
@@ -600,17 +634,25 @@ final class CodexBrowserAssistant: ObservableObject {
         return directory.path
     }
 
-    private func promptForUserRequest(_ text: String) async throws -> String {
+    private func promptForUserRequest(_ text: String, attachments: String? = nil) async throws -> String {
         guard isEnabled else { throw CodexAppServerError.protocolError(disabledMessage) }
+        // Fold launcher-selected tab/file context into the request body so Codex
+        // can use it without a separate page-text channel.
+        let request: String
+        if let attachments, !attachments.isEmpty {
+            request = "\(text)\n\n——— Attached context the user selected ———\n\(attachments)"
+        } else {
+            request = text
+        }
         if usesDynamicTools {
             return """
             You are Millie's built-in browser assistant. Use the Millie browser tools whenever you need page contents, tab state, or browser actions. Millie asks the user before sharing browser/page data or before changing browser state. Do not ask the user to sign in; Millie is using local Codex authentication.
 
-            User request: \(text)
+            User request: \(request)
             """
         }
 
-        guard store != nil else { return text }
+        guard store != nil else { return request }
         return """
         You are Millie's built-in browser assistant. The native dynamic tool channel is unavailable in this Codex app-server version, so use this JSON protocol exactly.
         Return only one JSON object. Do not wrap it in Markdown and do not add a session summary.
@@ -625,7 +667,7 @@ final class CodexBrowserAssistant: ObservableObject {
         Available tools — use the exact name and the arguments shown:
         \(BrowserAutomation.dynamicTools)
 
-        User request: \(text)
+        User request: \(request)
         """
     }
 
@@ -1381,8 +1423,31 @@ final class CodexAppServerConnection {
     private static func spawnEnvironment(codexPath: String) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
+        // `codex` is a Node script, so the spawn PATH must contain `node`. Node
+        // version managers install node under a versioned dir that a Finder-
+        // launched app never inherits. Discover NVM (and fnm) node bins —
+        // newest version first — so the shebang resolves regardless of launch.
+        let nvmBins: [String] = {
+            let roots = ["\(home)/.nvm/versions/node",
+                         "\(home)/.local/share/fnm/node-versions"]
+            var dirs: [String] = []
+            for root in roots {
+                guard let entries = try? FileManager.default
+                    .contentsOfDirectory(atPath: root) else { continue }
+                let sorted = entries.sorted { $0.compare($1, options: .numeric) == .orderedDescending }
+                for v in sorted {
+                    // fnm nests an extra "installation" dir; try both layouts.
+                    for bin in ["\(root)/\(v)/bin", "\(root)/\(v)/installation/bin"]
+                    where FileManager.default.fileExists(atPath: "\(bin)/node") {
+                        dirs.append(bin)
+                    }
+                }
+            }
+            return dirs
+        }()
         let preferredDirs = [
-            URL(fileURLWithPath: codexPath).deletingLastPathComponent().path,
+            URL(fileURLWithPath: codexPath).deletingLastPathComponent().path
+        ] + nvmBins + [
             "\(home)/.local/bin",
             "\(home)/.bun/bin",
             "\(home)/.npm-global/bin",

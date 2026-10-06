@@ -67,8 +67,11 @@ class MoriLocationBar : public LocationBar {
   OmniboxView* GetOmniboxView() override;
   OmniboxController* GetOmniboxController() override;
   // 150 added GetOmniboxPopupView() as a pure virtual on LocationBar; the Mori
-  // stub has no omnibox popup view, so return null.
-  OmniboxPopupView* GetOmniboxPopupView() override { return nullptr; }
+  // stub has no omnibox popup view, so return null (body in the .mm — an inline
+  // virtual body trips chromium-style).
+  OmniboxPopupView* GetOmniboxPopupView() override;
+  // 153 added AnnounceAlert() as a pure virtual on LocationBar; no-op here.
+  void AnnounceAlert(const std::u16string& announcement) override;
   bool ShouldCloseOmniboxPopup(ui::MouseEvent* event) override;
   content::WebContents* GetWebContents() override;
   LocationBarModel* GetLocationBarModel() override;
@@ -125,11 +128,23 @@ class MoriExclusiveAccessContext : public ExclusiveAccessContext {
       const url::Origin& origin,
       ExclusiveAccessBubbleHideCallback first_hide_callback = {});
   void HideFullscreenDisclosure(ExclusiveAccessBubbleHideReason reason);
+  // Idempotently restore the window's saved (non-opaque) compositing state and
+  // tear down the exit observer. Safe to call when nothing was saved.
+  void RestoreWindowCompositing();
 
   Browser* browser_;
   void* fullscreen_disclosure_ = nullptr;
   ExclusiveAccessBubbleHideCallback fullscreen_disclosure_hide_callback_;
   bool exclusive_access_bubble_visible_ = false;
+  // Saved window compositing state while in exclusive-access (video) fullscreen.
+  // Millie's window is normally non-opaque (rounded corners + behind-window
+  // vibrancy), which prevents macOS from promoting a fullscreen <video> to a
+  // hardware overlay plane → the whole Retina screen is GPU-composited every
+  // frame → choppy playback. We make the window opaque for the takeover and
+  // restore these on exit.
+  bool saved_window_opaque_ = false;
+  void* saved_window_background_ = nullptr;  // __bridge_retained NSColor*
+  void* fullscreen_exit_observer_ = nullptr;  // __bridge_retained id (NSNotif token)
 };
 
 // Hosts Chrome's constrained (tab-modal) dialogs — JS alerts, HTTP auth,
@@ -137,7 +152,7 @@ class MoriExclusiveAccessContext : public ExclusiveAccessContext {
 // what makes Chrome's real dialog widgets work without a BrowserView.
 class MoriModalDialogHost : public web_modal::WebContentsModalDialogHost {
  public:
-  MoriModalDialogHost() = default;
+  MoriModalDialogHost();
   ~MoriModalDialogHost() override;
 
   gfx::NativeView GetHostView() const override;
@@ -199,9 +214,12 @@ class MoriBrowserWindow : public BrowserWindow {
   void OnTabDetached(content::WebContents* contents, bool was_active) override;
   gfx::Size GetContentsSize() const override;
   void SetContentsSize(const gfx::Size& size) override;
-  void UpdatePageActionIcon(PageActionIconType type) override;
+  // 153 removed UpdatePageActionIcon / ExecutePageActionIconForTesting from the
+  // BrowserWindow interface; kept as no-op members (definitions remain in the
+  // .mm) but no longer 'override'.
+  void UpdatePageActionIcon(PageActionIconType type);
   autofill::AutofillBubbleHandler* GetAutofillBubbleHandler() override;
-  void ExecutePageActionIconForTesting(PageActionIconType type) override;
+  void ExecutePageActionIconForTesting(PageActionIconType type);
   LocationBar* GetLocationBar() const override;
   void SetFocusToLocationBar(bool is_user_initiated) override;
   void UpdateReloadStopState(bool is_loading, bool force) override;

@@ -142,8 +142,14 @@ final class MillieSync: ObservableObject {
     // MARK: Sync lifecycle
 
     private func startSyncing() async {
-        await pushNow()
+        // Pull BEFORE the first push. Pushing first overwrote the cloud Space
+        // arrays (tab_ids / pinned_tab_ids) with this device's local set before
+        // merging — so whichever device launched last with a smaller pin set
+        // clobbered everyone else's pins, and they never converged upward. The
+        // union merge lives in pull(); do it first so the initial push carries
+        // the merged (super)set, not a stale local subset.
         await pull()
+        await pushNow()
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -189,10 +195,26 @@ final class MillieSync: ObservableObject {
         await upsert("millie_history", history)
         await upsert("millie_archive", archive)
 
+        // A PINNED tab is an intentional keep. Its cloud row may be tombstoned
+        // (deleted=true) from another device closing its twin — and the upsert
+        // above doesn't carry `deleted`, so merge-duplicates leaves the tombstone
+        // in place. Explicitly clear it so the pin propagates as LIVE to every
+        // device (incl. iOS) instead of being re-deleted on the next pull. This
+        // is the cloud-side complement to applyRemoteSync's local pin protection:
+        // for a pinned tab, keep wins over a remote close.
+        let pinnedIDs = Set(publicContexts.flatMap { $0.pinnedTabIDs })
+            .subtracting(privateTabIDs)
+        for id in pinnedIDs {
+            try? await patch("millie_tabs", id: id, body: ["deleted": false])
+        }
+
         // Propagate local deletions as tombstones (deleted=true) so other devices
-        // drop them instead of resurrecting them on the next union merge.
+        // drop them instead of resurrecting them on the next union merge. Never
+        // tombstone a still-pinned tab (pin wins).
         let (deadTabs, deadSpaces) = browser.drainTombstones()
-        for id in deadTabs { try? await patch("millie_tabs", id: id, body: ["deleted": true]) }
+        for id in deadTabs where !pinnedIDs.contains(id) {
+            try? await patch("millie_tabs", id: id, body: ["deleted": true])
+        }
         for id in deadSpaces { try? await patch("millie_spaces", id: id, body: ["deleted": true]) }
     }
 
@@ -232,8 +254,12 @@ final class MillieSync: ObservableObject {
                 ArchiveStore.shared.add(url: r.url, title: r.title, faviconURL: r.favicon_url)
             }
         }
-        // Send-tab commands → open on this Mac, then mark consumed.
-        if let cmds: [CommandRow] = try? await select("millie_commands", filter: "consumed_at=is.null") {
+        // Send-tab commands → open on this Mac, then mark consumed. Only rows
+        // addressed to the Mac (or to no one in particular): iOS now claims
+        // `target_device=ios`, and the Mac must leave those for the phone.
+        if let cmds: [CommandRow] = try? await select(
+            "millie_commands",
+            filter: "consumed_at=is.null&or=(target_device.is.null,target_device.eq.macos)") {
             for c in cmds where c.kind == "openTab" {
                 browser?.newTab(url: c.url, select: false)
                 await markConsumed(c.id)

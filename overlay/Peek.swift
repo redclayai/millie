@@ -32,6 +32,14 @@ extension BrowserStore {
         // New-tab links opened FROM a peek stay in the peek (Little Arc style):
         // the overlay just shows the next page instead of spawning real tabs.
         tab.onRequestNewTab = { [weak self] u in self?.peek(url: u, profileKey: resolvedProfile) }
+        // An OAuth "you can close this tab" popup (opened via window.open, so it
+        // landed in the Peek) finishes by calling window.close(). Honor it: the
+        // engine tears down the WebContents and reports back here, so the Peek
+        // dismisses itself instead of stranding a dead card the user can't exit.
+        tab.onEngineClose = { [weak self, weak tab] in
+            guard let self, let tab, self.peekTab === tab else { return }
+            self.closePeek()
+        }
         tab.realize()
         tab.markAccessed()
         // Defer closing the previous peek to the next runloop tick. peek() can
@@ -223,15 +231,51 @@ private struct PeekCard: View {
 /// peek blank at the new size. Debounced so a live drag kicks only on release.
 private final class PeekHostView: NSView {
     private var repaintKick: DispatchWorkItem?
+    private var activationObservers: [NSObjectProtocol] = []
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A Peek opened from another app (Mail, Choosy handoff, …) mounts while
+        // Millie is still in the background. On Chromium 152 the mount-time
+        // kickCompositor (SynchronizeVisualProperties) no longer forces a frame
+        // from a backgrounded window, so the card stays gray until a real resize
+        // (the user maximizing). Re-kick when Millie actually comes to the front
+        // — app activation and this window becoming key both cover the handoff.
+        activationObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        activationObservers.removeAll()
+        guard window != nil else { return }
+        let kick: (Notification) -> Void = { [weak self] _ in self?.kickSubviews() }
+        let nc = NotificationCenter.default
+        activationObservers.append(
+            nc.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                           object: nil, queue: .main, using: kick))
+        activationObservers.append(
+            nc.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                           object: window, queue: .main, using: kick))
+    }
+
+    deinit {
+        activationObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    private func kickSubviews() {
+        for sub in subviews where !sub.isHidden {
+            guard let bv = sub as? MoriBrowserView else { continue }
+            bv.kickCompositor()
+            // 152 safety net: SynchronizeVisualProperties alone won't force a
+            // frame without a real size delta (why maximizing fixes the gray
+            // card). Nudge the view 1pt and restore next tick so the web view's
+            // RenderWidgetHostView sees an actual resize and paints.
+            let f = bv.frame
+            bv.setFrameSize(NSSize(width: f.width - 1, height: f.height))
+            DispatchQueue.main.async { bv.setFrameSize(f.size) }
+        }
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         repaintKick?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            for sub in self.subviews where !sub.isHidden {
-                (sub as? MoriBrowserView)?.kickCompositor()
-            }
-        }
+        let work = DispatchWorkItem { [weak self] in self?.kickSubviews() }
         repaintKick = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
     }

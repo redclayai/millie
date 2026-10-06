@@ -41,6 +41,7 @@ extension BrowserStore {
         // cadence when the playing/idle state flips.
         mediaActiveTabIDs = mediaActiveTabIDs.filter { id in
             tabs.contains { $0.id == id && $0.hasRealized && !$0.isAsleep }
+                || realizedPanelTabs.contains { $0.id == id }
         }
         let active = !mediaActiveTabIDs.isEmpty
             || tabs.contains { $0.hasRealized && !$0.isAsleep && $0.isAudible }
@@ -75,22 +76,32 @@ extension BrowserStore {
                 || tab.id == selectedTabID
                 || mediaActiveTabIDs.contains(tab.id)
             guard sample else { continue }
-            let id = tab.id
-            let browserId = Int(tab.browserView.browserIdentifier)
-            Task { @MainActor in
-                let result = try? await tab.evaluateMediaJavaScript(
-                    "window.__moriMediaState ? window.__moriMediaState() : ''")
-                let json = (result as? String) ?? ""
-                if json.isEmpty {
-                    self.mediaActiveTabIDs.remove(id)
-                    return
-                }
-                self.mediaActiveTabIDs.insert(id)
-                NotificationCenter.default.post(
-                    name: Notification.Name("MoriMediaUpdated"),
-                    object: nil,
-                    userInfo: ["browserId": browserId, "json": json])
+            sampleMedia(tab)
+        }
+        // Web panels (docked side-panel apps — a music player, etc.) live outside
+        // the tab strip and never sleep. Sample them every tick so the sidebar
+        // now-playing player reflects what the panel is actually playing instead
+        // of some background tab.
+        for tab in realizedPanelTabs { sampleMedia(tab) }
+    }
+
+    /// Pull one tab's media snapshot and rebroadcast it to `MediaController`.
+    private func sampleMedia(_ tab: BrowserTab) {
+        let id = tab.id
+        let browserId = Int(tab.browserView.browserIdentifier)
+        Task { @MainActor in
+            let result = try? await tab.evaluateMediaJavaScript(
+                "window.__moriMediaState ? window.__moriMediaState() : ''")
+            let json = (result as? String) ?? ""
+            if json.isEmpty {
+                self.mediaActiveTabIDs.remove(id)
+                return
             }
+            self.mediaActiveTabIDs.insert(id)
+            NotificationCenter.default.post(
+                name: Notification.Name("MoriMediaUpdated"),
+                object: nil,
+                userInfo: ["browserId": browserId, "json": json])
         }
     }
 }

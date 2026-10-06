@@ -8,6 +8,7 @@
 
 #include "base/strings/sys_string_conversions.h"
 #include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
 #include "chrome/browser/ui/unload_controller.h"  // UnloadController::From / DownloadCloseType (M152)
 #include "chrome/browser/ui/mori/mori_chrome_hooks.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
@@ -158,6 +159,12 @@ OmniboxView* MoriLocationBar::GetOmniboxView() {
   return nullptr;
 }
 
+OmniboxPopupView* MoriLocationBar::GetOmniboxPopupView() {
+  return nullptr;
+}
+
+void MoriLocationBar::AnnounceAlert(const std::u16string& announcement) {}
+
 OmniboxController* MoriLocationBar::GetOmniboxController() {
   return nullptr;
 }
@@ -264,6 +271,7 @@ MoriExclusiveAccessContext::MoriExclusiveAccessContext(Browser* browser)
 
 MoriExclusiveAccessContext::~MoriExclusiveAccessContext() {
   HideFullscreenDisclosure(ExclusiveAccessBubbleHideReason::kInterrupted);
+  RestoreWindowCompositing();
 }
 
 Profile* MoriExclusiveAccessContext::GetProfile() {
@@ -280,6 +288,31 @@ void MoriExclusiveAccessContext::EnterFullscreen(
     ExclusiveAccessBubbleType bubble_type,
     FullscreenTabParams fullscreen_tab_params) {
   NSWindow* window = mori::MoriMainWindow();
+  // Make the window opaque so macOS can promote the fullscreen <video> to a
+  // hardware overlay plane (see header). Save prior state once; guard against a
+  // second EnterFullscreen clobbering the saved values with our own black.
+  if (window && !saved_window_background_) {
+    saved_window_opaque_ = window.opaque;
+    saved_window_background_ = (__bridge_retained void*)window.backgroundColor;
+    window.opaque = YES;
+    window.backgroundColor = NSColor.blackColor;
+    // Safety net: restore even if fullscreen is left by a path that never calls
+    // ExitFullscreen (⌃⌘F, the green button, Mission Control) so the window can't
+    // get stuck opaque with broken rounded corners / vibrancy.
+    id token = [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSWindowDidExitFullScreenNotification
+                    object:window
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification*) { RestoreWindowCompositing(); }];
+    fullscreen_exit_observer_ = (__bridge_retained void*)token;
+    // Tell the SwiftUI chrome we're in video fullscreen so it drops the web
+    // card's rounded-corner mask + border overlay — a layer mask/overlay blocks
+    // macOS from promoting the <video> to a hardware overlay plane (choppy 4K).
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"MoriVideoFullscreenChanged"
+                      object:nil
+                    userInfo:@{@"active" : @YES}];
+  }
   if (window && !(window.styleMask & NSWindowStyleMaskFullScreen)) {
     [window toggleFullScreen:nil];
   }
@@ -291,6 +324,29 @@ void MoriExclusiveAccessContext::ExitFullscreen() {
   NSWindow* window = mori::MoriMainWindow();
   if (window && (window.styleMask & NSWindowStyleMaskFullScreen)) {
     [window toggleFullScreen:nil];
+  }
+  // Restore the window's normal non-opaque (rounded + vibrant) compositing.
+  RestoreWindowCompositing();
+}
+
+void MoriExclusiveAccessContext::RestoreWindowCompositing() {
+  if (!saved_window_background_) {
+    return;
+  }
+  NSColor* saved = (__bridge_transfer NSColor*)saved_window_background_;
+  saved_window_background_ = nullptr;
+  if (NSWindow* window = mori::MoriMainWindow()) {
+    window.opaque = saved_window_opaque_;
+    window.backgroundColor = saved;
+  }
+  [[NSNotificationCenter defaultCenter]
+      postNotificationName:@"MoriVideoFullscreenChanged"
+                    object:nil
+                  userInfo:@{@"active" : @NO}];
+  if (fullscreen_exit_observer_) {
+    id token = (__bridge_transfer id)fullscreen_exit_observer_;
+    fullscreen_exit_observer_ = nullptr;
+    [[NSNotificationCenter defaultCenter] removeObserver:token];
   }
 }
 
@@ -432,10 +488,24 @@ void MoriExclusiveAccessContext::HideFullscreenDisclosure(
 }
 
 MoriBrowserWindow::~MoriBrowserWindow() {
+  // 153 contract: each BrowserWindow implementation must run the pre-destruction
+  // teardown of BrowserWindowFeatures while it (and the Browser) are still alive.
+  // Browser::~Browser() resets window_ (this) BEFORE features_, and the vanilla
+  // windows (BrowserWidget::~, WebUIBrowserWindow::~) call this here. Without it,
+  // features_ later destructs its members in raw reverse-declaration order,
+  // freeing immersive_mode_controller_ before ContextualTasksCloseButtonController
+  // (which observes it via ScopedObservation) -> use-after-free on window close.
+  // TearDownPreBrowserWindowDestruction() resets contextual_tasks_* first, then
+  // immersive_mode_controller_, in the safe order.
+  if (browser_) {
+    browser_->GetFeatures().TearDownPreBrowserWindowDestruction();
+  }
   mori::OnBrowserWindowDestroyed(browser_);
 }
 
 // --- MoriModalDialogHost ----------------------------------------------------
+
+MoriModalDialogHost::MoriModalDialogHost() = default;
 
 MoriModalDialogHost::~MoriModalDialogHost() {
   for (auto& observer : observers_) {

@@ -51,6 +51,13 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 /// The page started or stopped producing audible sound.
 - (void)browserView:(MoriBrowserView *)view
     didChangeAudioState:(BOOL)audible;
+/// The underlying WebContents was destroyed by the ENGINE rather than by a
+/// Millie-initiated close — e.g. the page called `window.close()` (common at the
+/// end of OAuth popups: "you can close this tab"), or the renderer crashed.
+/// Millie must drop its own reference to this view/tab: a peek should dismiss,
+/// a normal tab should close. NOT called for closes Millie itself initiated
+/// (those already remove the tab), so the delegate can act unconditionally.
+- (void)browserViewDidCloseFromEngine:(MoriBrowserView *)view;
 @end
 
 @interface MoriBrowserView : NSView
@@ -128,6 +135,11 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 
 /// Make this browser the first responder / give it keyboard focus.
 - (void)focusBrowser;
+
+/// YES when this view has a live WebContents in a visible, unhidden window — i.e.
+/// it's ready to be focused / painted. Used to gate the web-panel first-paint
+/// nudge until the panel's WebContents has realized.
+- (BOOL)canReceiveBrowserFocus;
 
 /// Take key-window + first-responder for this browser WITHOUT calling
 /// RenderWidgetHost::Focus()/WebContents::Focus(). Used when handing the

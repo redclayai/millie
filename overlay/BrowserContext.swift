@@ -49,6 +49,13 @@ struct BrowserContext: Identifiable, Equatable, Codable {
     /// session and never synced. Decodes as false from older sessions.
     var isPrivate: Bool = false
 
+    /// The id the store uses for the "Personal" context it creates when a
+    /// session restores with none. STABLE on purpose: a fresh profile dir or a
+    /// dev build with no session.json used to mint a brand-new Space id every
+    /// time, and sync — which unions Spaces by id — kept every one of them. Four
+    /// Spaces called "Personal" showed up in the picker that way.
+    static let defaultContextID = UUID(uuidString: "0EFA0117-0000-4000-A000-000000000001")!
+
     init(id: UUID = UUID(),
          name: String,
          symbol: String = "glyph-circle",

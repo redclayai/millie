@@ -93,7 +93,6 @@ class MoriPermissionPrompt : public permissions::PermissionPrompt {
   std::optional<gfx::Rect> GetViewBoundsInScreen() const override {
     return std::nullopt;
   }
-  bool ShouldFinalizeRequestAfterDecided() const override { return true; }
   std::vector<permissions::ElementAnchoredBubbleVariant> GetPromptVariants()
       const override {
     return {};

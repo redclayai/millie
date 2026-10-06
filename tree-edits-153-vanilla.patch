@@ -1,0 +1,3140 @@
+diff --git a/build/config/apple/swift_source_set.gni b/build/config/apple/swift_source_set.gni
+index ed3d091330..506c71590a 100644
+--- a/build/config/apple/swift_source_set.gni
++++ b/build/config/apple/swift_source_set.gni
+@@ -269,10 +269,13 @@ template("swift_source_set") {
+ 
+     # C++ and obj-C++ targets with a direct dependency on a swift_source_set
+     # need to be able to indirectly include headers from the SDK.
+-    if (!defined(public_configs)) {
+-      public_configs = []
++    # (iOS-only config; macOS Mori usage doesn't rely on C++/Swift interop.)
++    if (is_ios) {
++      if (!defined(public_configs)) {
++        public_configs = []
++      }
++      public_configs += [ "//build/config/ios:swift_cxx_interop_includes" ]
+     }
+-    public_configs += [ "//build/config/ios:swift_cxx_interop_includes" ]
+   }
+ }
+ 
+diff --git a/build/config/mac/BUILD.gn b/build/config/mac/BUILD.gn
+index b21e766931..7b599542b9 100644
+--- a/build/config/mac/BUILD.gn
++++ b/build/config/mac/BUILD.gn
+@@ -36,6 +36,20 @@ config("compiler") {
+ 
+   ldflags = common_mac_flags
+ 
++  # Swift is normally iOS-only; the Mori overlay compiles SwiftUI on macOS.
++  # Provide the swiftc target triple and SDK so swift_source_set targets build.
++  # Mori's SwiftUI uses macOS 14 APIs; compile Swift against a 14.0 minimum
++  # even though the rest of the binary targets $mac_deployment_target (this is
++  # the expected Swift deployment-target mismatch warning, see BUILDING.md).
++  swiftflags = [
++    "-target",
++    "$clang_arch-apple-macos14.0",
++    "-sdk",
++    rebase_path(sysroot, root_build_dir),
++    "-swift-version",
++    "5",
++  ]
++
+   if (save_unstripped_output) {
+     ldflags += [ "-Wcrl,unstripped," + rebase_path(root_out_dir) ]
+   }
+@@ -118,3 +132,13 @@ if (use_system_xcode && current_toolchain == default_toolchain) {
+     }
+   }
+ }
++
++# Swift runtime linkage for the Mori overlay's swift_source_set. macOS ships an
++# ABI-stable Swift runtime in /usr/lib/swift; link against the SDK stubs and add
++# an rpath so the framework that links Mori's Swift module resolves swift_*.
++config("swift_runtime") {
++  ldflags = [
++    "-L" + rebase_path(sysroot, root_build_dir) + "/usr/lib/swift",
++    "-Wl,-rpath,/usr/lib/swift",
++  ]
++}
+diff --git a/build/toolchain/apple/toolchain.gni b/build/toolchain/apple/toolchain.gni
+index 7b00996ea8..33cf78a1a6 100644
+--- a/build/toolchain/apple/toolchain.gni
++++ b/build/toolchain/apple/toolchain.gni
+@@ -747,10 +747,11 @@ template("single_apple_toolchain") {
+       pool = "//build/toolchain/apple:bundle_pool($default_toolchain)"
+     }
+ 
+-    # Swift is only used on iOS, not macOS. We want to minimize the number
+-    # of Xcode-based tools used by the macOS toolchain, so we intentionally
+-    # disallow future uses of Swift on macOS. https://crbug.com/965663.
+-    if (toolchain_args.current_os == "ios") {
++    # Swift is normally only used on iOS, not macOS (https://crbug.com/965663).
++    # The Mori overlay requires compiling SwiftUI chrome on macOS, so the swift
++    # tool is enabled for the macOS toolchain as well.
++    if (toolchain_args.current_os == "ios" ||
++        toolchain_args.current_os == "mac") {
+       tool("swift") {
+         _tool = rebase_path("//build/toolchain/apple/swiftc.py", root_build_dir)
+ 
+@@ -834,7 +835,8 @@ template("single_apple_toolchain") {
+           _env_vars += " XCODE_VERSION=${toolchain_args.xcode_build}"
+         }
+ 
+-        if (invoker.sdk_developer_dir != "") {
++        if (defined(invoker.sdk_developer_dir) &&
++            invoker.sdk_developer_dir != "") {
+           _env_vars += " DEVELOPER_DIR=${toolchain_args.sdk_developer_dir}"
+         }
+ 
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index c84f6d4898..97ff107acf 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -625,6 +625,12 @@ if (is_win) {
+         rebase_path(inputs[0], root_out_dir),
+         "--allow",
+         "/usr/lib/libSystem.B.dylib",
++
++        # Millie: Sparkle (auto-update) is linked via the Chromium Framework, so
++        # it appears as a load command here too. It loads read-only in every
++        # process but the updater only runs in the browser process.
++        "--allow",
++        "@rpath/Sparkle.framework/Versions/B/Sparkle",
+       ]
+       deps = [ ":chrome_app" ]
+     }
+@@ -1394,6 +1400,12 @@ if (is_win) {
+ 
+     public_deps = [ ":chrome_dll" ]
+ 
++    # Millie: link Sparkle (auto-update) into the framework binary ONLY — not the
++    # app/helper executables — so it loads once via the shared framework. The
++    # @loader_path rpath (added to ldflags below) resolves it to Contents/Frameworks.
++    frameworks = [ "Sparkle.framework" ]
++    framework_dirs = [ "//chrome/browser/ui/mori/thirdparty" ]
++
+     bundle_deps = [
+       ":aperitif_library",
+       ":chrome_framework_helpers",
+@@ -1430,6 +1442,12 @@ if (is_win) {
+       chrome_dylib_version,
+       "-current_version",
+       chrome_dylib_version,
++
++      # Millie: resolve @rpath/Sparkle.framework from the framework binary. From
++      # …/Chromium Framework.framework/Versions/<v>/Chromium Framework, three dirs
++      # up is Contents/Frameworks (works for every process that loads the
++      # framework — browser and helpers alike).
++      "-Wl,-rpath,@loader_path/../../..",
+     ]
+ 
+     if (!is_component_build) {
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 5655d73273..a708a5bac0 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -1101,6 +1101,30 @@ void ChromeMainDelegate::SetupTracing() {
+ }
+ 
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
++  // Millie (vanilla-153 POC): bake in HEVC decoder support for premium
++  // streaming so it applies on a normal (Dock) launch without being passed
++  // manually.
++  //  - PlatformHEVCDecoderSupport: HEVC is compiled in but gated off at runtime.
++  // NOTE: the 152 build also force-appended --disable-gpu-compositing here
++  // because protected (EME) video rendered blank in Millie's non-Views window
++  // under GPU compositing. This POC intentionally OMITS that switch to test
++  // whether mainline 153 presents protected video correctly with GPU
++  // compositing left ON.
++  // Appended here (the earliest delegate hook) so it lands before FeatureList
++  // and GPU initialization.
++  {
++    base::CommandLine* mori_cmd = base::CommandLine::ForCurrentProcess();
++    std::string mori_features =
++        mori_cmd->GetSwitchValueASCII("enable-features");
++    if (mori_features.find("PlatformHEVCDecoderSupport") ==
++        std::string::npos) {
++      mori_cmd->AppendSwitchASCII(
++          "enable-features",
++          mori_features.empty()
++              ? "PlatformHEVCDecoderSupport"
++              : mori_features + ",PlatformHEVCDecoderSupport");
++    }
++  }
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+ #endif
+diff --git a/chrome/browser/app_controller_mac.mm b/chrome/browser/app_controller_mac.mm
+index 51af775d30..53fbed52ea 100644
+--- a/chrome/browser/app_controller_mac.mm
++++ b/chrome/browser/app_controller_mac.mm
+@@ -74,6 +74,7 @@
+ #include "chrome/browser/tab_group_sync/tab_group_sync_service_factory.h"
+ #include "chrome/browser/task_manager/task_manager_metrics_recorder.h"
+ #include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/mori/mori_chrome_hooks.h"
+ #include "chrome/browser/ui/browser_command_controller.h"
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_live_tab_context.h"
+@@ -2643,6 +2644,24 @@ void UpdateProfileInUse(Profile* profile) {
+ 
+ void OpenStartupTabsInBrowserWithProfile(const StartupTabs& tabs,
+                                          Profile* profile) {
++  // Mori: route external URL opens (Choosy/Finder/other apps, plus the
++  // process-singleton handoff when a second instance is launched with a URL)
++  // into the active Space's own tab creation. Chrome's default path below opens
++  // them in an unobserved Views browser whose tab never becomes a Millie tab —
++  // the "link just flashes and nothing happens" bug. OpenExternalUrls returns
++  // true when Millie has taken ownership of the URLs.
++  // M152: this funnel now receives StartupTabs (was std::vector<GURL>); pull the
++  // urls back out to feed the Mori hook.
++  {
++    std::vector<GURL> mori_urls;
++    mori_urls.reserve(tabs.size());
++    for (const StartupTab& mori_tab : tabs) {
++      mori_urls.push_back(mori_tab.url);
++    }
++    if (mori::OpenExternalUrls(mori_urls)) {
++      return;
++    }
++  }
+   if (!profile)
+     return;  // No suitable profile to open the URLs, do nothing.
+   // Prefer a regular (non-incognito) profile
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index e30528ed87..ac336553fb 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -472,6 +472,7 @@
+ #elif BUILDFLAG(IS_MAC)
+ #include "chrome/browser/browser_process_platform_part_mac.h"
+ #include "chrome/browser/enterprise/platform_auth/platform_auth_proxying_url_loader_factory.h"
++#include "chrome/browser/ui/mori/mori_adblock.h"  // Millie built-in ad blocker
+ #include "chrome/common/chrome_version.h"
+ #include "components/enterprise/platform_auth/platform_auth_features.h"
+ #include "components/soda/constants.h"
+@@ -6652,6 +6653,20 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+       frame, type == URLLoaderFactoryType::kNavigation, request_initiator,
+       isolation_info, factory_builder);
+ 
++#if BUILDFLAG(IS_MAC)
++  // Millie built-in ad/tracker blocker: proxy subresource factories so ad hosts
++  // are cancelled before they hit the network. Self-gates on the "Block ads"
++  // setting; the top-frame host feeds the per-site "don't block ads on this
++  // site" allowlist.
++  mori::MaybeProxyAdblock(
++      factory_builder,
++      type == URLLoaderFactoryType::kDocumentSubResource ||
++          type == URLLoaderFactoryType::kWorkerSubResource,
++      isolation_info.top_frame_origin()
++          ? isolation_info.top_frame_origin()->host()
++          : std::string());
++#endif
++
+ #if BUILDFLAG(ENABLE_CAPTIVE_PORTAL_DETECTION)
+   if (disable_secure_dns) {
+     WebContents* web_contents = WebContents::FromRenderFrameHost(frame);
+diff --git a/chrome/browser/component_updater/BUILD.gn b/chrome/browser/component_updater/BUILD.gn
+index 19b6470756..4db2c3da51 100644
+--- a/chrome/browser/component_updater/BUILD.gn
++++ b/chrome/browser/component_updater/BUILD.gn
+@@ -182,6 +182,9 @@ source_set("impl") {
+     "//media",
+     "//services/cert_verifier/public/mojom",
+     "//services/network/public/cpp",
++    # Millie: zip::Unzip, used to extract the bundled Widevine CDM on macOS
++    # (widevine_cdm_component_installer.cc MaybeSeedBundledWidevineCdm).
++    "//third_party/zlib/google:zip",
+   ]
+ 
+   if (safe_browsing_mode == 2) {
+diff --git a/chrome/browser/component_updater/widevine_cdm_component_installer.cc b/chrome/browser/component_updater/widevine_cdm_component_installer.cc
+index 198513af0e..b198bc2a00 100644
+--- a/chrome/browser/component_updater/widevine_cdm_component_installer.cc
++++ b/chrome/browser/component_updater/widevine_cdm_component_installer.cc
+@@ -51,6 +51,16 @@
+ #include "chromeos/ash/components/dbus/image_loader/image_loader_client.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++// Millie: needed to seed the bundled Widevine CDM on first run (see
++// MaybeSeedBundledWidevineCdm below).
++#include "base/apple/bundle_locations.h"
++#include "base/files/file_enumerator.h"
++#include "base/path_service.h"
++#include "chrome/common/chrome_paths.h"
++#include "third_party/zlib/google/zip.h"
++#endif
++
+ #if !BUILDFLAG(ENABLE_WIDEVINE_CDM_COMPONENT)
+ #error This file should only be compiled when Widevine CDM component is enabled
+ #endif
+@@ -66,6 +76,69 @@ const uint8_t kWidevineSha2Hash[] = {
+     0x9b, 0xfb, 0x4f, 0xbb, 0x1b, 0xa9, 0xd3, 0x85, 0x37, 0xef};
+ static_assert(std::size(kWidevineSha2Hash) == crypto::kSHA256Length);
+ 
++#if BUILDFLAG(IS_MAC)
++// Millie: seed the bundled Widevine CDM into the user-data dir on first run.
++// ungoogled-chromium's domain substitution disables the component-updater
++// on-demand fetch, so a fresh profile has no CDM and premium DRM (Netflix,
++// DirecTV) fails with "Unsupported keySystem". Millie ships the CDM as an
++// opaque zip in Resources (opaque so notarization doesn't scan the non-hardened
++// Google-signed dylib), and this extracts it into <user-data>/WidevineCdm/
++// BEFORE the component installer scans that directory during registration — so
++// protected playback works on the very first launch, no download, no restart.
++// Runs once: subsequent launches find the CDM present and return immediately.
++void MaybeSeedBundledWidevineCdm() {
++  // First-run only; a one-time ~17MB extraction at startup. Blocking file I/O
++  // here is fine: this is an official (non-DCHECK) build where thread blocking
++  // restrictions are not enforced, and the work runs exactly once per profile.
++  base::FilePath user_data;
++  if (!base::PathService::Get(chrome::DIR_USER_DATA, &user_data)) {
++    return;
++  }
++  const base::FilePath cdm_root = user_data.AppendASCII("WidevineCdm");
++
++  // Already installed (by a previous run or a component update)? Look for a
++  // real arm64 CDM under any version directory.
++  {
++    base::FileEnumerator dirs(cdm_root, /*recursive=*/false,
++                              base::FileEnumerator::DIRECTORIES);
++    for (base::FilePath d = dirs.Next(); !d.empty(); d = dirs.Next()) {
++      if (base::PathExists(d.Append("_platform_specific")
++                               .Append("mac_arm64")
++                               .Append("libwidevinecdm.dylib"))) {
++        return;
++      }
++    }
++  }
++
++  // Locate the CDM zip bundled in the app's Resources.
++  const base::FilePath zip_path = base::apple::OuterBundlePath()
++                                      .Append("Contents")
++                                      .Append("Resources")
++                                      .Append("WidevineCdm.zip");
++  if (!base::PathExists(zip_path)) {
++    return;  // Not bundled (e.g. a bare dev build) — nothing to seed.
++  }
++
++  if (!base::CreateDirectory(cdm_root) || !zip::Unzip(zip_path, cdm_root)) {
++    VLOG(1) << "Millie: failed to extract bundled Widevine CDM.";
++    return;
++  }
++
++  // Write the component hint file for parity with a component-updated install,
++  // pointing at the extracted version directory.
++  base::FileEnumerator dirs(cdm_root, /*recursive=*/false,
++                            base::FileEnumerator::DIRECTORIES);
++  for (base::FilePath d = dirs.Next(); !d.empty(); d = dirs.Next()) {
++    if (base::PathExists(d.Append("manifest.json"))) {
++      base::WriteFile(cdm_root.Append("latest-component-updated-widevine-cdm"),
++                      "{\"Path\":\"" + d.value() + "\"}");
++      break;
++    }
++  }
++  VLOG(1) << "Millie: seeded bundled Widevine CDM into " << cdm_root;
++}
++#endif  // BUILDFLAG(IS_MAC)
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ // On ChromeOS the component updated CDM comes as a disk image which must be
+ // registered and then mounted in order to access the files. The startup
+@@ -437,6 +510,10 @@ void WidevineCdmComponentInstallerPolicy::UpdateCdmPath(
+ }
+ 
+ void RegisterWidevineCdmComponent(ComponentUpdateService* cus) {
++#if BUILDFLAG(IS_MAC)
++  // Ensure the bundled CDM is present before the installer scans for it.
++  MaybeSeedBundledWidevineCdm();
++#endif
+   auto installer = base::MakeRefCounted<ComponentInstaller>(
+       std::make_unique<WidevineCdmComponentInstallerPolicy>());
+   installer->Register(cus, base::OnceClosure());
+diff --git a/chrome/browser/new_tab_page/feature_promo_helper/new_tab_page_feature_promo_helper.cc b/chrome/browser/new_tab_page/feature_promo_helper/new_tab_page_feature_promo_helper.cc
+index 9e19a0fbfb..dc294922ae 100644
+--- a/chrome/browser/new_tab_page/feature_promo_helper/new_tab_page_feature_promo_helper.cc
++++ b/chrome/browser/new_tab_page/feature_promo_helper/new_tab_page_feature_promo_helper.cc
+@@ -207,8 +207,16 @@ void NewTabPageFeaturePromoHelper::MaybeTriggerAutomaticCustomizeChromePromo(
+     content::WebContents* web_contents) {
+ #if !BUILDFLAG(IS_ANDROID)
+   auto* browser_interface = webui::GetBrowserWindowInterface(web_contents);
+-  if (!browser_interface ||
+-      browser_interface->GetFeatures().side_panel_ui()->IsSidePanelEntryShowing(
++  if (!browser_interface) {
++    return;
++  }
++  // Mori: Millie's custom native window has no chrome BrowserView, so no
++  // SidePanelUI is created (see browser_window_features.cc). The customize-
++  // chrome promo targets the side panel, so there is nothing to show; bail
++  // instead of dereferencing a null side_panel_ui().
++  auto* side_panel_ui = browser_interface->GetFeatures().side_panel_ui();
++  if (!side_panel_ui ||
++      side_panel_ui->IsSidePanelEntryShowing(
+           SidePanelEntryKey(SidePanelEntryId::kCustomizeChrome))) {
+     return;
+   }
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index 2e7510e36d..6a36ad272c 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -2,6 +2,7 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//build/config/apple/swift_source_set.gni")
+ import("//build/config/buildflags_paint_preview.gni")
+ import("//build/config/compiler/compiler.gni")
+ import("//build/config/features.gni")
+@@ -2355,6 +2356,21 @@ static_library("ui") {
+       "browser_commands_mac.mm",
+       "browser_mac.cc",
+       "browser_mac.h",
++
++      # Mori overlay: native SwiftUI browser chrome bridge (see mori/).
++      "mori/MoriBrowserView.h",
++      "mori/MoriPrivacy.h",
++      "mori/mori_adblock.h",
++      "mori/mori_adblock.mm",
++      "mori/mori_browser_window.h",
++      "mori/mori_browser_window.mm",
++      "mori/mori_chrome_bridge.mm",
++      "mori/mori_chrome_extensions.mm",
++      "mori/mori_chrome_hooks.h",
++      "mori/mori_import.h",
++      "mori/mori_import.mm",
++      "mori/mori_permission_prompt.h",
++      "mori/mori_permission_prompt.mm",
+       "fullscreen_util_mac.cc",
+       "fullscreen_util_mac.h",
+       "views/certificate_viewer_mac_views.mm",
+@@ -2386,6 +2402,7 @@ static_library("ui") {
+       "//chrome/browser:app_controller_mac",
+       "//chrome/browser:chrome_browser_application_mac",
+       "//chrome/browser:global_keyboard_shortcuts_mac",
++      ":mori_ui_swift",
+       "//chrome/browser/mac",
+       "//chrome/browser/renderer_host:delegate",
+       "//chrome/browser/renderer_host:history_swiping_control",
+@@ -4182,6 +4199,109 @@ if (use_aura) {
+   }
+ }
+ 
++# Mori overlay: SwiftUI browser chrome compiled as a Swift module and
++# linked into the //chrome/browser/ui library (see mori/).
++if (is_mac) {
++  # Sparkle (in-app auto-update) is vendored at mori/thirdparty/Sparkle.framework.
++  # The actual framework link + rpath live on //chrome:chrome_framework so Sparkle
++  # binds to the framework binary only (not the app/helper executables). Here we
++  # just give swiftc -F so `import Sparkle` resolves at compile time.
++
++  swift_source_set("mori_ui_swift") {
++    sources = [
++      "mori/AIPanel.swift",
++      "mori/AdBlockStore.swift",
++      "mori/AirTrafficControl.swift",
++      "mori/TopDomains.swift",
++      "mori/BrowserImporter.swift",
++      "mori/ImportPanel.swift",
++      "mori/WelcomeOverlay.swift",
++      "mori/ArchiveStore.swift",
++      "mori/BookmarkStore.swift",
++      "mori/BoostStore.swift",
++      "mori/Boosts.swift",
++      "mori/BrowserAutomation.swift",
++      "mori/BrowserContext.swift",
++      "mori/BrowserSettings.swift",
++      "mori/BrowserStore+DragDrop.swift",
++      "mori/BrowserStore.swift",
++      "mori/BrowserTab.swift",
++      "mori/MillieSync.swift",
++      "mori/MillyAIClient.swift",
++      "mori/CodexAppServerClient.swift",
++      "mori/Components.swift",
++      "mori/ContextMenu.swift",
++      "mori/Contexts.swift",
++      "mori/DownloadStore.swift",
++      "mori/DownloadsPanel.swift",
++      "mori/ExtensionStore.swift",
++      "mori/ExtensionsMenu.swift",
++      "mori/FaviconKit.swift",
++      "mori/FindBar.swift",
++      "mori/FontRegistry.swift",
++      "mori/Glass.swift",
++      "mori/GradientEngine.swift",
++      "mori/GradientTheme.swift",
++      "mori/HistoryStore.swift",
++      "mori/Icon.swift",
++      "mori/LauncherOverlay.swift",
++      "mori/LibraryPanel.swift",
++      "mori/MediaAgentScripts.swift",
++      "mori/MediaController.swift",
++      "mori/MediaPlayer.swift",
++      "mori/MediaPolling.swift",
++      "mori/MillieUpdater.swift",
++      "mori/MoriRoot.swift",
++      "mori/MorphingFolderIcon.swift",
++      "mori/OKLCH.swift",
++      "mori/PasskeyAuthenticator.swift",
++      "mori/PasskeySupport.swift",
++      "mori/Peek.swift",
++      "mori/PiPWindowStyler.swift",
++      "mori/Reader.swift",
++      "mori/RootView.swift",
++      "mori/RouteStore.swift",
++      "mori/SafeBrowsingOverlay.swift",
++      "mori/Screenshot.swift",
++      "mori/SettingsView.swift",
++      "mori/ThreatStore.swift",
++      "mori/SuggestClient.swift",
++      "mori/SpeechDictation.swift",
++      "mori/ShortcutRegistry.swift",
++      "mori/Sidebar.swift",
++      "mori/SidebarPeek.swift",
++      "mori/TabFolder.swift",
++      "mori/TabMaintenance.swift",
++      "mori/TabRow.swift",
++      "mori/Theme.swift",
++      "mori/ThemePicker.swift",
++      "mori/ThemePresets.swift",
++      "mori/ToastCenter.swift",
++      "mori/ToastOverlay.swift",
++      "mori/Toolbar.swift",
++      "mori/WebContainerView.swift",
++    ]
++    bridge_header = "mori/mori_bridge.h"
++    # -F so swiftc finds the Sparkle module for `import Sparkle`.
++    swiftflags = [
++      "-F",
++      rebase_path("//chrome/browser/ui/mori/thirdparty", root_build_dir),
++    ]
++    all_dependent_configs = [ "//build/config/mac:swift_runtime" ]
++    frameworks = [
++      "AVFoundation.framework",
++      "AppKit.framework",
++      "Combine.framework",
++      "CryptoKit.framework",
++      "Foundation.framework",
++      "LocalAuthentication.framework",
++      "Security.framework",
++      "SwiftUI.framework",
++      "UniformTypeIdentifiers.framework",
++    ]
++  }
++}
++
+ source_set("status_bubble") {
+   public = [ "status_bubble.h" ]
+   public_deps = [ "//url" ]
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index 3f62ffd338..ea6f9a3119 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -57,6 +57,9 @@
+ #include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_actions.h"
+ #include "chrome/browser/ui/browser_commands.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/ui/mori/mori_chrome_hooks.h"  // Millie incognito routing
++#endif
+ #include "chrome/browser/ui/browser_element_identifiers.h"
+ #include "chrome/browser/ui/browser_select_file_dialog_controller.h"
+ #include "chrome/browser/ui/browser_window.h"
+@@ -636,6 +639,16 @@ bool BrowserCommandController::ExecuteCommandWithDispositionAndContext(
+     return false;
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // Millie: route File-menu commands that don't fit the Spaces / non-Views
++  // chrome (new tab/window/incognito, reopen closed tab, open location, close
++  // tab) to the SwiftUI store. Chrome's own handlers open unobserved windows or
++  // assume a Views browser, so they silently do nothing here.
++  if (mori::HandleBrowserCommand(id)) {
++    return true;
++  }
++#endif
++
+   // No commands are enabled if there is not yet any selected tab.
+   // TODO(pkasting): It seems like we should not need this, because either
+   // most/all commands should not have been enabled yet anyway or the ones that
+diff --git a/chrome/browser/ui/mori/AIPanel.swift b/chrome/browser/ui/mori/AIPanel.swift
+index 8d4e9aa009..90191e42fd 100644
+--- a/chrome/browser/ui/mori/AIPanel.swift
++++ b/chrome/browser/ui/mori/AIPanel.swift
+@@ -30,10 +30,30 @@ struct AIPanel: View {
+         }
+         .frame(width: 360)
+         .task { await assistant.loadModelCatalogIfNeeded() }
++        // Launcher "Add tabs or files" flow: consume a staged request on first
++        // appear (the panel was just opened for it) and on any later change
++        // (the panel was already open).
++        .onAppear { consumeLauncherRequest() }
++        .onChange(of: store.aiLauncherRequest) { _, _ in consumeLauncherRequest() }
+         // No own background: the unified chrome surface (set on the root) shows
+         // through, so the panel follows the selected theme like the sidebar.
+     }
+ 
++    /// Forward a launcher-staged Ask-Millie request to the assistant: send the
++    /// question with its attachment context, or (empty question) stage the
++    /// context and focus the composer so the user can type.
++    private func consumeLauncherRequest() {
++        guard let req = store.aiLauncherRequest else { return }
++        store.aiLauncherRequest = nil
++        let question = req.question.trimmingCharacters(in: .whitespacesAndNewlines)
++        if question.isEmpty {
++            assistant.stageContext(title: req.title, text: req.context)
++            inputFocused = true
++        } else {
++            assistant.sendWithContext(question, title: req.title, text: req.context)
++        }
++    }
++
+     private var header: some View {
+         HStack(spacing: 8) {
+             Icon(name: "sparkles", size: 16)
+diff --git a/chrome/browser/ui/mori/BrowserStore.swift b/chrome/browser/ui/mori/BrowserStore.swift
+index 1393e579a1..baeed3be87 100644
+--- a/chrome/browser/ui/mori/BrowserStore.swift
++++ b/chrome/browser/ui/mori/BrowserStore.swift
+@@ -2,6 +2,20 @@ import SwiftUI
+ import AppKit
+ import Combine
+ 
++/// A one-shot Ask-Millie request staged by the launcher's "Add tabs or files"
++/// flow and consumed by `AIPanel`. `id` makes each request distinct so the
++/// panel's `onChange` fires even for an identical question/context pair.
++struct AILauncherRequest: Equatable {
++    let id = UUID()
++    var question: String
++    var title: String
++    var context: String
++
++    static func == (lhs: AILauncherRequest, rhs: AILauncherRequest) -> Bool {
++        lhs.id == rhs.id
++    }
++}
++
+ /// Top-level browser state: the open tabs, selection, and chrome toggles.
+ final class BrowserStore: ObservableObject {
+     @Published var tabs: [BrowserTab] = []
+@@ -18,6 +32,12 @@ final class BrowserStore: ObservableObject {
+     /// router can force the SwiftUI text field to resign — otherwise it re-grabs
+     /// first responder a beat after a main-web click and swallows ⌘C/⌘V.
+     @Published var aiInputFocused = false
++    /// A one-shot Ask-Millie request staged by the launcher's "Add tabs or files"
++    /// flow. `AIPanel` consumes it on appear/change: with a question it sends the
++    /// question carrying the attachment `context`; with an empty question it
++    /// stages the context and focuses the composer so the user can type. Cleared
++    /// by the panel once consumed.
++    @Published var aiLauncherRequest: AILauncherRequest?
+     /// The web panel currently shown in the right-edge dock (nil = dock closed).
+     @Published var activePanelID: WebPanel.ID? {
+         didSet {
+@@ -176,6 +196,10 @@ final class BrowserStore: ObservableObject {
+     private let sessionFileURL: URL
+     private var sessionSaveScheduled = false
+     private var isRestoringSession = false
++    /// Set once the app is quitting. Suppresses debounced session saves so
++    /// shutdown-induced tab churn can't overwrite the authoritative save that
++    /// prepareForTermination() writes while the real tabs are still intact.
++    private var isTerminating = false
+ 
+     /// Repeating timer that drives auto-sleep and auto-archive (see
+     /// TabMaintenance.swift). Retained here for the lifetime of the store.
+@@ -507,7 +531,7 @@ final class BrowserStore: ObservableObject {
+     }
+ 
+     func scheduleSessionSave() {
+-        guard !isRestoringSession, !sessionSaveScheduled else { return }
++        guard !isRestoringSession, !isTerminating, !sessionSaveScheduled else { return }
+         sessionSaveScheduled = true
+         DispatchQueue.main.async { [weak self] in
+             guard let self else { return }
+@@ -1521,6 +1545,16 @@ final class BrowserStore: ObservableObject {
+         withAnimation(Motion.reveal) { aiPanelVisible = true }
+     }
+ 
++    /// Open the assistant carrying launcher-selected tab/file context. With a
++    /// non-empty `question` the panel sends it immediately with the attachment
++    /// `context`; with an empty question the panel stages the context and focuses
++    /// the composer. If AI is off, the usual disabled-integration path handles it.
++    func askMillieWithContext(question: String, title: String, context: String) {
++        guard prepareAIPanelOpen() else { return }
++        aiLauncherRequest = AILauncherRequest(question: question, title: title, context: context)
++        withAnimation(Motion.reveal) { aiPanelVisible = true }
++    }
++
+     func toggleAIPanel() {
+         guard prepareAIPanelOpen() else { return }
+         withAnimation(Motion.reveal) { aiPanelVisible.toggle() }
+@@ -1550,6 +1584,11 @@ final class BrowserStore: ObservableObject {
+     }
+ 
+     func prepareForTermination() {
++        // Block any further debounced saves: from here on only this
++        // authoritative save should touch session.json, so late shutdown churn
++        // (a self-closing tab, an emptied strip minting a replacement) can't
++        // clobber the real session.
++        isTerminating = true
+         // Make sure the cookie jar is written before we tear CEF down, so
+         // sessions reliably survive the quit.
+         saveSession()
+diff --git a/chrome/browser/ui/mori/CodexAppServerClient.swift b/chrome/browser/ui/mori/CodexAppServerClient.swift
+index 509e4bc5e7..42d181cf1b 100644
+--- a/chrome/browser/ui/mori/CodexAppServerClient.swift
++++ b/chrome/browser/ui/mori/CodexAppServerClient.swift
+@@ -72,6 +72,10 @@ final class CodexBrowserAssistant: ObservableObject {
+     private var pendingAssistantText = ""
+     private var turnWatchdogTask: Task<Void, Never>?
+     private var settingsMirror: AnyCancellable?
++    /// Launcher-attached context (selected tabs/files) to carry on the NEXT turn,
++    /// then clear. For cloud providers it becomes the page title/text passed to
++    /// `MillyAIClient.ask`; for local Codex it is appended to the prompt.
++    private var stagedContext: (title: String, text: String)?
+ 
+     init(store: BrowserStore) {
+         self.store = store
+@@ -189,6 +193,21 @@ final class CodexBrowserAssistant: ObservableObject {
+         }
+     }
+ 
++    /// Stage launcher attachment context for the next turn without sending. Used
++    /// for the empty-query case (the composer is focused and the user types their
++    /// question, which then carries this context).
++    func stageContext(title: String, text: String) {
++        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
++        guard !trimmed.isEmpty else { return }
++        stagedContext = (title, trimmed)
++    }
++
++    /// Stage attachment context and immediately send `question` as one turn.
++    func sendWithContext(_ question: String, title: String, text: String) {
++        stageContext(title: title, text: text)
++        send(question)
++    }
++
+     func send(_ rawText: String) {
+         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+         guard !text.isEmpty, !isWorking else { return }
+@@ -215,12 +234,17 @@ final class CodexBrowserAssistant: ObservableObject {
+         isWorking = true
+         statusText = "Starting Codex"
+ 
++        // Consume any launcher-staged attachment context for this turn; Codex has
++        // no page-text parameter, so it rides along inside the prompt.
++        let staged = stagedContext
++        stagedContext = nil
++
+         Task { @MainActor in
+             do {
+                 let threadId = try await ensureThread()
+                 fallbackToolIterations = 0
+                 pendingAssistantText = ""
+-                let prompt = try await promptForUserRequest(text)
++                let prompt = try await promptForUserRequest(text, attachments: staged?.text)
+                 try await startTurn(threadId: threadId, prompt: prompt)
+             } catch {
+                 replaceActiveAssistantText("I couldn't reach the local Codex app server: \(error.localizedDescription)")
+@@ -253,8 +277,18 @@ final class CodexBrowserAssistant: ObservableObject {
+             .filter { $0.role != .tool }
+             .map { MillyAIClient.Turn(role: $0.role == .user ? "user" : "assistant", text: $0.text) }
+ 
++        // Consume any launcher-staged attachment context for this turn; it
++        // replaces the live page context as the question's grounding.
++        let staged = stagedContext
++        stagedContext = nil
++
+         Task { @MainActor in
+-            let (title, page) = await currentPageContext()
++            let (title, page): (String, String)
++            if let staged {
++                (title, page) = (staged.title, staged.text)
++            } else {
++                (title, page) = await currentPageContext()
++            }
+             do {
+                 let answer = try await MillyAIClient.shared.ask(
+                     question: text, pageTitle: title, pageText: page, history: Array(history))
+@@ -600,17 +634,25 @@ final class CodexBrowserAssistant: ObservableObject {
+         return directory.path
+     }
+ 
+-    private func promptForUserRequest(_ text: String) async throws -> String {
++    private func promptForUserRequest(_ text: String, attachments: String? = nil) async throws -> String {
+         guard isEnabled else { throw CodexAppServerError.protocolError(disabledMessage) }
++        // Fold launcher-selected tab/file context into the request body so Codex
++        // can use it without a separate page-text channel.
++        let request: String
++        if let attachments, !attachments.isEmpty {
++            request = "\(text)\n\n——— Attached context the user selected ———\n\(attachments)"
++        } else {
++            request = text
++        }
+         if usesDynamicTools {
+             return """
+             You are Millie's built-in browser assistant. Use the Millie browser tools whenever you need page contents, tab state, or browser actions. Millie asks the user before sharing browser/page data or before changing browser state. Do not ask the user to sign in; Millie is using local Codex authentication.
+ 
+-            User request: \(text)
++            User request: \(request)
+             """
+         }
+ 
+-        guard store != nil else { return text }
++        guard store != nil else { return request }
+         return """
+         You are Millie's built-in browser assistant. The native dynamic tool channel is unavailable in this Codex app-server version, so use this JSON protocol exactly.
+         Return only one JSON object. Do not wrap it in Markdown and do not add a session summary.
+@@ -625,7 +667,7 @@ final class CodexBrowserAssistant: ObservableObject {
+         Available tools — use the exact name and the arguments shown:
+         \(BrowserAutomation.dynamicTools)
+ 
+-        User request: \(text)
++        User request: \(request)
+         """
+     }
+ 
+@@ -1381,8 +1423,31 @@ final class CodexAppServerConnection {
+     private static func spawnEnvironment(codexPath: String) -> [String: String] {
+         var environment = ProcessInfo.processInfo.environment
+         let home = NSHomeDirectory()
++        // `codex` is a Node script, so the spawn PATH must contain `node`. Node
++        // version managers install node under a versioned dir that a Finder-
++        // launched app never inherits. Discover NVM (and fnm) node bins —
++        // newest version first — so the shebang resolves regardless of launch.
++        let nvmBins: [String] = {
++            let roots = ["\(home)/.nvm/versions/node",
++                         "\(home)/.local/share/fnm/node-versions"]
++            var dirs: [String] = []
++            for root in roots {
++                guard let entries = try? FileManager.default
++                    .contentsOfDirectory(atPath: root) else { continue }
++                let sorted = entries.sorted { $0.compare($1, options: .numeric) == .orderedDescending }
++                for v in sorted {
++                    // fnm nests an extra "installation" dir; try both layouts.
++                    for bin in ["\(root)/\(v)/bin", "\(root)/\(v)/installation/bin"]
++                    where FileManager.default.fileExists(atPath: "\(bin)/node") {
++                        dirs.append(bin)
++                    }
++                }
++            }
++            return dirs
++        }()
+         let preferredDirs = [
+-            URL(fileURLWithPath: codexPath).deletingLastPathComponent().path,
++            URL(fileURLWithPath: codexPath).deletingLastPathComponent().path
++        ] + nvmBins + [
+             "\(home)/.local/bin",
+             "\(home)/.bun/bin",
+             "\(home)/.npm-global/bin",
+diff --git a/chrome/browser/ui/mori/LauncherOverlay.swift b/chrome/browser/ui/mori/LauncherOverlay.swift
+index 767ef1f498..71c65283c5 100644
+--- a/chrome/browser/ui/mori/LauncherOverlay.swift
++++ b/chrome/browser/ui/mori/LauncherOverlay.swift
+@@ -1,6 +1,8 @@
+ import SwiftUI
+ import AppKit
+ import Combine
++import PDFKit
++import UniformTypeIdentifiers
+ 
+ /// The new-tab launcher — a Spotlight-style command palette floated above the
+ /// web content. Triggered by ⌘T / the sidebar's "New Tab" row instead of
+@@ -182,6 +184,21 @@ private struct LauncherView: View {
+     @State private var query = ""
+     @State private var highlighted = 0
+     @State private var siteSearch: SiteSearch?
++    /// Live keyless query suggestions (Google suggest). Owned here so it lives
++    /// for the duration of one launcher presentation and cancels cleanly.
++    @StateObject private var suggest = SuggestClient()
++    /// Live speech-to-text for the mic button; streams into `query` while active.
++    @StateObject private var dictation = SpeechDictation()
++
++    /// "Add tabs or files" selections, shown as removable chips and gathered as
++    /// Ask-Millie context on submit.
++    @State private var attachedTabIDs: [UUID] = []
++    @State private var attachedFiles: [URL] = []
++    @State private var showingAttachPicker = false
++
++    private var hasAttachments: Bool {
++        !attachedTabIDs.isEmpty || !attachedFiles.isEmpty
++    }
+ 
+     private var items: [LauncherItem] {
+         // Chip active → one canonical row; Enter and the row do the same thing.
+@@ -191,21 +208,50 @@ private struct LauncherView: View {
+             return [LauncherItem(id: "site-search", title: title,
+                                  url: ss.url(for: query), faviconURL: nil,
+                                  tabID: nil, action: "Search",
++                                 iconSystemName: "magnifyingglass",
+                                  run: { commitSiteSearch() })]
+         }
+-        var out = LauncherItem.build(query: query, store: store)
++        var out = LauncherItem.build(query: query, store: store,
++                                     suggestions: suggestionsForCurrentQuery)
+         // Keyword typed but not yet activated → offer the chip as the top row.
+         if let match = SiteSearch.match(query) {
+             out.insert(LauncherItem(id: "site-hint-\(match.id)",
+                                     title: "Search \(match.name)",
+                                     url: match.home, faviconURL: nil,
+                                     tabID: nil, action: "Tab",
++                                    iconSystemName: match.id == "google" ? "magnifyingglass" : "globe",
+                                     run: { activateSiteSearch(match) }),
+                        at: 0)
+         }
+         return out
+     }
+ 
++    /// Suggestions, but only when they belong to the text now in the field
++    /// (a late response for a stale query is ignored by matching on the trim).
++    private var suggestionsForCurrentQuery: [String] {
++        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
++        guard suggest.activeQuery == trimmed else { return [] }
++        return suggest.suggestions
++    }
++
++    /// Inline ghost-autocomplete target: the host of the first address/site
++    /// result whose host begins with what the user has typed. `nil` disables
++    /// completion (phrases, chips, empty, paths, already-complete hosts).
++    private var inlineCompletion: String? {
++        guard siteSearch == nil else { return nil }
++        let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
++        guard !typed.isEmpty, !typed.contains(" "), !typed.contains("/"),
++              !typed.contains("://") else { return nil }
++        let typedLower = typed.lowercased()
++        for item in items {
++            guard let host = item.completionHost else { continue }
++            if host.lowercased().hasPrefix(typedLower), host.count > typed.count {
++                return host
++            }
++        }
++        return nil
++    }
++
+     var body: some View {
+         GeometryReader { geo in
+             ZStack(alignment: .top) {
+@@ -235,6 +281,22 @@ private struct LauncherView: View {
+         .onChange(of: query) { _, text in
+             highlighted = 0
+             autoActivateOnSpace(text)
++            // Fire-and-forget: debounced, cancels in flight, fails silent.
++            if siteSearch == nil {
++                suggest.request(for: text)
++            } else {
++                suggest.clear()
++            }
++        }
++        // Mirror the live dictation transcript into the search field while the
++        // mic is active, so speech drives the same query the user types into.
++        .onChange(of: dictation.transcript) { _, text in
++            guard dictation.isListening, !text.isEmpty else { return }
++            query = text
++        }
++        .onDisappear {
++            suggest.clear()
++            dictation.stop()
+         }
+     }
+ 
+@@ -251,6 +313,10 @@ private struct LauncherView: View {
+         VStack(spacing: 0) {
+             header
+ 
++            if hasAttachments {
++                attachmentChips
++            }
++
+             if !items.isEmpty {
+                 Rectangle()
+                     .fill(p.border.color.opacity(0.4))
+@@ -316,11 +382,15 @@ private struct LauncherView: View {
+                                     selectAllOnFocus: !store.launcherPrefill.isEmpty,
+                                     foregroundColor: p.foreground.nsColor,
+                                     insertionColor: p.primary.nsColor,
++                                    completionColor: p.mutedForeground.nsColor,
++                                    inlineCompletion: inlineCompletion,
+                                     onMove: move,
+                                     onEscape: store.dismissLauncher,
+                                     onSubmit: commit,
+                                     onTab: handleTab,
+-                                    onEmptyDelete: handleEmptyDelete)
++                                    onEmptyDelete: handleEmptyDelete,
++                                    onAcceptInline: acceptInlineCompletion,
++                                    onAcceptInlineSubmit: acceptInlineCompletionAndOpen)
+                     .frame(height: 30)
+             }
+ 
+@@ -340,28 +410,219 @@ private struct LauncherView: View {
+         .frame(height: LauncherMetrics.headerHeight)
+     }
+ 
+-    /// Always-visible footer row (mirrors the reference design).
++    /// Dia-style bottom action bar: a left "Add tabs or files" pill and overflow
++    /// control, a right-side mic glyph, and a primary "Go ↵" button that fires
++    /// the current selection (identical to Enter).
+     private var footer: some View {
+-        Button {
+-            store.dismissLauncher()
+-            if let url = URL(string: "mailto:?subject=Millie%20Feedback") {
+-                NSWorkspace.shared.open(url)
++        HStack(spacing: 8) {
++            // "Add tabs or files" — opens a picker of open tabs + a file chooser,
++            // staging them as Ask-Millie context.
++            Button { showingAttachPicker.toggle() } label: {
++                softPillShape {
++                    HStack(spacing: 6) {
++                        Icon(name: "plus", size: 12, weight: .semibold)
++                        Text("Add tabs or files")
++                            .font(Typography.ui(Typography.label, weight: .medium))
++                    }
++                    .foregroundStyle(hasAttachments ? LauncherMetrics.accent : p.mutedForeground.color)
++                    .padding(.horizontal, 12)
++                    .frame(height: LauncherMetrics.footerControl)
++                }
+             }
+-        } label: {
+-            HStack(spacing: 11) {
+-                Icon(name: "bubble.left.and.bubble.right", size: 15, weight: .medium)
+-                    .foregroundStyle(p.mutedForeground.color)
+-                    .frame(width: 26, height: 26)
+-                Text("Contact the Team")
+-                    .font(Typography.ui(Typography.base, weight: .medium))
+-                    .foregroundStyle(p.foreground.color)
+-                Spacer(minLength: 0)
++            .buttonStyle(.plain)
++            .help("Add open tabs or files as context for Ask Millie")
++            .popover(isPresented: $showingAttachPicker, arrowEdge: .top) {
++                AttachPicker(store: store,
++                             attachedTabIDs: $attachedTabIDs,
++                             attachedFiles: $attachedFiles,
++                             chooseFiles: chooseFiles)
++                    .environment(\.palette, p)
+             }
+-            .padding(.horizontal, LauncherMetrics.rowInnerPadding + LauncherMetrics.resultsPadding)
+-            .frame(height: LauncherMetrics.rowHeight)
+-            .contentShape(Rectangle())
++
++            // Overflow — opens Settings (a sensible, non-crashing destination).
++            Button {
++                store.dismissLauncher()
++                store.settingsVisible = true
++            } label: {
++                softPillShape {
++                    Icon(name: "ellipsis", size: 15, weight: .semibold)
++                        .foregroundStyle(p.mutedForeground.color)
++                        .frame(width: LauncherMetrics.footerControl,
++                               height: LauncherMetrics.footerControl)
++                }
++            }
++            .buttonStyle(.plain)
++            .help("More")
++
++            Spacer(minLength: 0)
++
++            // Mic — toggles live dictation into the search field.
++            Button { dictation.toggle() } label: {
++                softPillShape {
++                    Icon(name: dictation.isListening ? "mic.fill"
++                             : (dictation.unavailable ? "mic.slash" : "mic"),
++                         size: 15, weight: .medium)
++                        .foregroundStyle(micTint)
++                        .frame(width: LauncherMetrics.footerControl,
++                               height: LauncherMetrics.footerControl)
++                }
++            }
++            .buttonStyle(.plain)
++            .help(dictation.isListening ? "Stop dictation"
++                      : (dictation.unavailable ? "Dictation unavailable" : "Dictate"))
++
++            // Go — activates the current selection, exactly like Enter.
++            Button { commit() } label: {
++                HStack(spacing: 6) {
++                    Text("Go")
++                        .font(Typography.ui(Typography.base, weight: .semibold))
++                    Icon(name: "return", size: 12, weight: .semibold)
++                }
++                .foregroundStyle(.white)
++                .padding(.horizontal, 15)
++                .frame(height: LauncherMetrics.footerControl + 2)
++                .background(Capsule(style: .continuous).fill(LauncherMetrics.accent))
++            }
++            .buttonStyle(.plain)
++            .help("Go")
+         }
+-        .buttonStyle(.plain)
++        .padding(.horizontal, LauncherMetrics.headerPadding)
++        .frame(height: LauncherMetrics.footerHeight)
++    }
++
++    /// A soft neutral pill used by the footer's secondary controls.
++    @ViewBuilder private func softPill<Content: View>(
++        @ViewBuilder _ content: () -> Content
++    ) -> some View {
++        softPillShape(content)
++    }
++
++    @ViewBuilder private func softPillShape<Content: View>(
++        @ViewBuilder _ content: () -> Content
++    ) -> some View {
++        content()
++            .background(Capsule(style: .continuous).fill(p.foreground.color.opacity(0.05)))
++    }
++
++    private var micTint: Color {
++        if dictation.isListening { return Color(.sRGB, red: 0.90, green: 0.22, blue: 0.22, opacity: 1) }
++        if dictation.unavailable { return p.mutedForeground.color.opacity(0.6) }
++        return p.mutedForeground.color
++    }
++
++    // MARK: Attachment chips
++
++    /// Removable chips for the selected tabs and files, between the header and
++    /// the results list.
++    private var attachmentChips: some View {
++        ScrollView(.horizontal, showsIndicators: false) {
++            HStack(spacing: 7) {
++                ForEach(attachedTabIDs, id: \.self) { id in
++                    if let tab = store.tabs.first(where: { $0.id == id }) {
++                        AttachmentChip(label: tab.displayTitle,
++                                       faviconURL: tab.faviconURL,
++                                       page: tab.displayURL,
++                                       systemIcon: nil) {
++                            attachedTabIDs.removeAll { $0 == id }
++                        }
++                    }
++                }
++                ForEach(attachedFiles, id: \.self) { url in
++                    AttachmentChip(label: url.lastPathComponent,
++                                   faviconURL: nil,
++                                   page: nil,
++                                   systemIcon: "doc") {
++                        attachedFiles.removeAll { $0 == url }
++                    }
++                }
++            }
++            .padding(.horizontal, LauncherMetrics.headerPadding)
++            .padding(.bottom, 10)
++        }
++    }
++
++    // MARK: Attachment handling
++
++    /// Open an NSOpenPanel for text / markdown / json / csv / pdf / source files.
++    private func chooseFiles() {
++        let panel = NSOpenPanel()
++        panel.allowsMultipleSelection = true
++        panel.canChooseDirectories = false
++        panel.canChooseFiles = true
++        let exts = ["txt", "md", "markdown", "text", "json", "csv", "pdf",
++                    "swift", "js", "ts", "tsx", "jsx", "py", "rb", "go", "rs",
++                    "java", "kt", "c", "h", "cpp", "hpp", "cc", "m", "mm", "cs",
++                    "php", "html", "css", "scss", "xml", "yaml", "yml", "toml",
++                    "ini", "sh", "sql", "r", "lua", "pl"]
++        panel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
++        panel.begin { response in
++            guard response == .OK else { return }
++            for url in panel.urls where !attachedFiles.contains(url) {
++                attachedFiles.append(url)
++            }
++        }
++    }
++
++    /// Submit the typed query together with the selected tabs/files as Ask-Millie
++    /// context. Gathering is async (tab text + file reads), so it runs after the
++    /// launcher dismisses.
++    private func submitWithAttachments() {
++        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
++        let tabs = attachedTabIDs.compactMap { id in store.tabs.first { $0.id == id } }
++        let files = attachedFiles
++        let summary = Self.attachmentSummary(tabCount: tabs.count, fileCount: files.count)
++        dictation.stop()
++        store.dismissLauncher()
++        Task { @MainActor in
++            let context = await Self.gatherContext(tabs: tabs, files: files)
++            store.askMillieWithContext(question: q, title: summary, context: context)
++        }
++    }
++
++    /// Build the labeled, budget-capped context string from the attachments.
++    private static func gatherContext(tabs: [BrowserTab], files: [URL]) async -> String {
++        let perItemCap = 6000
++        let totalCap = 16000
++        var parts: [String] = []
++        var total = 0
++        func add(_ s: String) {
++            guard total < totalCap else { return }
++            let chunk = String(s.prefix(totalCap - total))
++            parts.append(chunk)
++            total += chunk.count
++        }
++        for tab in tabs {
++            let raw = (try? await tab.evaluateJavaScript(
++                "document.body ? document.body.innerText : ''")) as? String ?? ""
++            let text = String(raw.prefix(perItemCap))
++                .trimmingCharacters(in: .whitespacesAndNewlines)
++            guard !text.isEmpty else { continue }
++            add("Tab — \(tab.displayTitle) (\(tab.displayURL)):\n\(text)\n\n")
++        }
++        for url in files {
++            guard let raw = readFileText(url) else { continue }
++            let text = String(raw.prefix(perItemCap))
++                .trimmingCharacters(in: .whitespacesAndNewlines)
++            guard !text.isEmpty else { continue }
++            add("File — \(url.lastPathComponent):\n\(text)\n\n")
++        }
++        return parts.joined()
++    }
++
++    /// Read a file as text: PDFs via PDFKit, everything else as UTF-8. Returns
++    /// nil for anything unreadable (skipped).
++    private static func readFileText(_ url: URL) -> String? {
++        if url.pathExtension.lowercased() == "pdf" {
++            return PDFDocument(url: url)?.string
++        }
++        return try? String(contentsOf: url, encoding: .utf8)
++    }
++
++    private static func attachmentSummary(tabCount: Int, fileCount: Int) -> String {
++        var bits: [String] = []
++        if tabCount > 0 { bits.append("\(tabCount) tab\(tabCount == 1 ? "" : "s")") }
++        if fileCount > 0 { bits.append("\(fileCount) file\(fileCount == 1 ? "" : "s")") }
++        return bits.isEmpty ? "attachments" : bits.joined(separator: " + ")
+     }
+ 
+     /// The results area hugs its content — a few rows keep the panel small,
+@@ -399,6 +660,12 @@ private struct LauncherView: View {
+     }
+ 
+     private func commit() {
++        // Attachments present → route to Ask Millie with the gathered context
++        // instead of the normal open/search flow.
++        if hasAttachments {
++            submitWithAttachments()
++            return
++        }
+         if siteSearch != nil {
+             commitSiteSearch()
+             return
+@@ -410,6 +677,22 @@ private struct LauncherView: View {
+         }
+     }
+ 
++    // MARK: Inline autocomplete
++
++    /// → pressed with a ghost completion showing: fold it into the query so the
++    /// field now holds the full host (completion stops re-firing because the
++    /// typed text already equals the host).
++    private func acceptInlineCompletion(_ host: String) {
++        query = host
++        highlighted = 0
++    }
++
++    /// Enter pressed with a ghost completion showing: open the completed host
++    /// directly as a URL (Spotlight/omnibox behavior).
++    private func acceptInlineCompletionAndOpen(_ host: String) {
++        store.launcherOpen(url: URLInterpreter.resolve(host, settings: store.settings))
++    }
++
+     // MARK: Site search (chip)
+ 
+     private func activateSiteSearch(_ provider: SiteSearch) {
+@@ -459,15 +742,18 @@ private struct LauncherView: View {
+ }
+ 
+ private enum LauncherMetrics {
+-    static let cardWidth: CGFloat = 780
++    static let cardWidth: CGFloat = 720
+     static let horizontalPadding: CGFloat = 24
+-    static let headerHeight: CGFloat = 68
+-    static let headerPadding: CGFloat = 22
+-    static let rowHeight: CGFloat = 54
++    static let headerHeight: CGFloat = 64
++    static let headerPadding: CGFloat = 20
++    static let rowHeight: CGFloat = 44
+     static let rowSpacing: CGFloat = 2
+-    static let resultsPadding: CGFloat = 8
++    static let resultsPadding: CGFloat = 10
+     static let rowInnerPadding: CGFloat = 12
+     static let rowCorner: CGFloat = 10
++    /// Footer control (pill / button) height, and the bar that holds them.
++    static let footerControl: CGFloat = 30
++    static let footerHeight: CGFloat = 56
+     static let visibleResultCount = 7
+     static let maxResultsHeight: CGFloat = {
+         let rows = CGFloat(visibleResultCount)
+@@ -497,6 +783,11 @@ private struct LauncherSearchField: NSViewRepresentable {
+     let selectAllOnFocus: Bool
+     let foregroundColor: NSColor
+     let insertionColor: NSColor
++    /// Color of the greyed inline-completion ("ghost") text.
++    var completionColor: NSColor = .secondaryLabelColor
++    /// Full host to inline-complete to (e.g. "cnn.com") when it extends `text`.
++    /// `nil` disables inline completion.
++    var inlineCompletion: String? = nil
+     let onMove: (Int) -> Void
+     let onEscape: () -> Void
+     let onSubmit: () -> Void
+@@ -504,6 +795,10 @@ private struct LauncherSearchField: NSViewRepresentable {
+     var onTab: () -> Bool = { false }
+     /// Backspace in an empty field — return true when handled (chip removal).
+     var onEmptyDelete: () -> Bool = { false }
++    /// → pressed with a ghost completion visible: accept it into the query.
++    var onAcceptInline: (String) -> Void = { _ in }
++    /// Enter pressed with a ghost completion visible: accept + open directly.
++    var onAcceptInlineSubmit: (String) -> Void = { _ in }
+ 
+     func makeCoordinator() -> Coordinator {
+         Coordinator(self)
+@@ -529,13 +824,19 @@ private struct LauncherSearchField: NSViewRepresentable {
+ 
+     func updateNSView(_ field: NSTextField, context: Context) {
+         context.coordinator.parent = self
+-        if field.stringValue != text {
++        // Don't clobber the field while it's displaying a valid ghost completion
++        // of `text` (that string legitimately differs from `text`).
++        let showingCompletion = inlineCompletion.map {
++            field.stringValue.lowercased() == $0.lowercased()
++        } ?? false
++        if field.stringValue != text, !showingCompletion {
+             field.stringValue = text
+         }
+         field.font = Self.font
+         field.textColor = foregroundColor
+         field.backgroundColor = .clear
+         context.coordinator.focusIfNeeded(field)
++        context.coordinator.applyInlineCompletion(field)
+     }
+ 
+     private static var font: NSFont {
+@@ -548,13 +849,20 @@ private struct LauncherSearchField: NSViewRepresentable {
+     final class Coordinator: NSObject, NSTextFieldDelegate {
+         var parent: LauncherSearchField
+         private var appliedFocusRequest: Int?
++        /// True while we're mutating the field editor programmatically to show a
++        /// ghost completion — so `controlTextDidChange` ignores that mutation.
++        private var applyingCompletion = false
++        /// Set when the user just deleted; suppresses one completion pass so a
++        /// backspace can actually remove characters instead of being re-filled.
++        private var suppressCompletion = false
+ 
+         init(_ parent: LauncherSearchField) {
+             self.parent = parent
+         }
+ 
+         func controlTextDidChange(_ notification: Notification) {
+-            guard let field = notification.object as? NSTextField else { return }
++            guard !applyingCompletion,
++                  let field = notification.object as? NSTextField else { return }
+             parent.text = field.stringValue
+         }
+ 
+@@ -563,27 +871,118 @@ private struct LauncherSearchField: NSViewRepresentable {
+                      doCommandBy commandSelector: Selector) -> Bool {
+             switch commandSelector {
+             case #selector(NSResponder.insertNewline(_:)):
++                // Enter accepts a visible ghost completion and opens it directly.
++                if completionSelectionPresent(textView) {
++                    parent.onAcceptInlineSubmit(textView.string)
++                    return true
++                }
+                 parent.onSubmit()
+                 return true
+             case #selector(NSResponder.moveDown(_:)):
++                // Navigating the list dismisses the ghost so Enter targets the
++                // highlighted row, not the completion.
++                _ = dismissCompletion(textView)
+                 parent.onMove(1)
+                 return true
+             case #selector(NSResponder.moveUp(_:)):
++                _ = dismissCompletion(textView)
+                 parent.onMove(-1)
+                 return true
++            case #selector(NSResponder.moveRight(_:)),
++                 #selector(NSResponder.moveToEndOfLine(_:)):
++                // → accepts the ghost completion into the query.
++                if completionSelectionPresent(textView) {
++                    let full = textView.string
++                    textView.setSelectedRange(
++                        NSRange(location: (full as NSString).length, length: 0))
++                    suppressCompletion = true
++                    parent.onAcceptInline(full)
++                    return true
++                }
++                return false
++            case #selector(NSResponder.moveLeft(_:)):
++                // ← restores the typed text (drops the ghost) rather than
++                // leaving the caret stranded inside the completion.
++                if dismissCompletion(textView) { return true }
++                return false
+             case #selector(NSResponder.cancelOperation(_:)):
+                 parent.onEscape()
+                 return true
+             case #selector(NSResponder.insertTab(_:)):
+                 return parent.onTab()
+             case #selector(NSResponder.deleteBackward(_:)):
+-                guard textView.string.isEmpty else { return false }
+-                return parent.onEmptyDelete()
++                if textView.string.isEmpty { return parent.onEmptyDelete() }
++                // User is deleting — don't re-complete on the resulting pass.
++                suppressCompletion = true
++                return false
++            case #selector(NSResponder.deleteForward(_:)):
++                suppressCompletion = true
++                return false
+             default:
+                 return false
+             }
+         }
+ 
++        // MARK: Inline completion
++
++        /// Whether the field editor currently shows our trailing ghost selection
++        /// (a selection that begins exactly after the typed text and runs to the
++        /// end). Used to decide if →/Enter should accept it.
++        private func completionSelectionPresent(_ tv: NSTextView) -> Bool {
++            let sel = tv.selectedRange()
++            let typedLen = (parent.text as NSString).length
++            let total = (tv.string as NSString).length
++            return sel.length > 0
++                && sel.location == typedLen
++                && sel.location + sel.length == total
++                && total > typedLen
++        }
++
++        /// Replace the field contents with the typed text, caret at the end.
++        /// Returns true if a ghost completion was actually present.
++        @discardableResult
++        private func dismissCompletion(_ tv: NSTextView) -> Bool {
++            guard completionSelectionPresent(tv) else { return false }
++            let typed = parent.text
++            applyingCompletion = true
++            tv.string = typed
++            tv.setSelectedRange(NSRange(location: (typed as NSString).length, length: 0))
++            applyingCompletion = false
++            suppressCompletion = true
++            return true
++        }
++
++        /// Apply the inline ghost completion to the field, if one is available
++        /// and the field currently shows exactly the typed text with the caret
++        /// at the end. Idempotent and safe to call on every update pass.
++        func applyInlineCompletion(_ field: NSTextField) {
++            if suppressCompletion { suppressCompletion = false; return }
++            guard let comp = parent.inlineCompletion,
++                  let editor = field.currentEditor() as? NSTextView else { return }
++            let typed = parent.text
++            let typedLen = (typed as NSString).length
++            guard typedLen > 0,
++                  (comp as NSString).length > typedLen,
++                  comp.lowercased().hasPrefix(typed.lowercased()),
++                  editor.string == typed else { return }
++            let sel = editor.selectedRange()
++            guard sel.length == 0, sel.location == typedLen else { return }
++
++            // Preserve the user's typed casing, append the remaining host chars.
++            let suffix = String(comp.dropFirst(typed.count))
++            let display = typed + suffix
++            applyingCompletion = true
++            editor.string = display
++            editor.selectedTextAttributes = [
++                .backgroundColor: parent.completionColor.withAlphaComponent(0.18),
++                .foregroundColor: parent.completionColor
++            ]
++            editor.setSelectedRange(
++                NSRange(location: typedLen, length: (display as NSString).length - typedLen))
++            applyInsertionColor(field)
++            applyingCompletion = false
++        }
++
+         func focusIfNeeded(_ field: NSTextField) {
+             let request = parent.focusRequest
+             guard appliedFocusRequest != request else {
+@@ -633,13 +1032,38 @@ private struct LauncherItem: Identifiable {
+     let tabID: BrowserTab.ID?
+     /// Trailing affordance label ("Switch to Tab", "Open", "Search").
+     let action: String
+-    /// For command results: the SF Symbol to show in place of a favicon.
++    /// For command/search results: the SF Symbol to show in place of a favicon.
+     var iconSystemName: String? = nil
++    /// Muted trailing host/subtitle ("cnn.com", "cnn.co…/path"), nil to hide.
++    var subtitle: String? = nil
+     /// For command results: the action to run on activation. Command closures
+     /// dismiss the launcher themselves.
+     var run: (() -> Void)? = nil
+ 
+-    static func build(query: String, store: BrowserStore) -> [LauncherItem] {
++    /// The bare host this row could inline-complete to (addressy rows only).
++    /// `nil` for commands, search suggestions, and deep links (with a path).
++    var completionHost: String? {
++        // Site predictions carry the domain as their title.
++        if id.hasPrefix("site-") { return title }
++        guard iconSystemName == nil,
++              let comps = URLComponents(string: url),
++              let host = comps.host,
++              comps.path.isEmpty || comps.path == "/" else { return nil }
++        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
++    }
++
++    /// Pretty "host + path" for the trailing subtitle; scheme and "www." are
++    /// dropped and a bare "/" path is omitted.
++    static func prettyURL(_ raw: String) -> String? {
++        guard let comps = URLComponents(string: raw), let host = comps.host else { return nil }
++        let h = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
++        let path = comps.path
++        return (path.isEmpty || path == "/") ? h : h + path
++    }
++
++    static func build(query: String,
++                      store: BrowserStore,
++                      suggestions: [String] = []) -> [LauncherItem] {
+         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+         let rawQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+         var seen = Set<String>()
+@@ -652,11 +1076,13 @@ private struct LauncherItem: Identifiable {
+             // Stable id (not keyed on the resolved URL) so the row persists
+             // across keystrokes instead of being torn down on every character.
+             out.append(LauncherItem(id: isAddress ? "direct-address" : "direct-search",
+-                                    title: isAddress ? "Open \(rawQuery)" : "Search \(rawQuery)",
++                                    title: isAddress ? rawQuery : rawQuery,
+                                     url: resolved,
+                                     faviconURL: nil,
+                                     tabID: nil,
+-                                    action: isAddress ? "Open" : "Search"))
++                                    action: isAddress ? "Open" : "Search",
++                                    iconSystemName: isAddress ? nil : "magnifyingglass",
++                                    subtitle: nil))
+         }
+ 
+         // Commands (actions), matched while typing — surfaced near the top.
+@@ -687,7 +1113,8 @@ private struct LauncherItem: Identifiable {
+                                     url: tab.displayURL,
+                                     faviconURL: tab.faviconURL,
+                                     tabID: tab.id,
+-                                    action: "Switch to Tab"))
++                                    action: "Switch to Tab",
++                                    subtitle: prettyURL(tab.displayURL)))
+         }
+ 
+         // History only while typing — idle stays compact (just the 4 recent
+@@ -702,7 +1129,46 @@ private struct LauncherItem: Identifiable {
+                                     url: entry.url,
+                                     faviconURL: nil,
+                                     tabID: nil,
+-                                    action: "Open"))
++                                    action: "Open",
++                                    subtitle: prettyURL(entry.url)))
++        }
++
++        // Site prediction: guess likely domains from a curated top-sites list
++        // (e.g. "cn" → cnn.com, cnbc.com…), so the type-ahead predicts sites
++        // you've never visited — not just history. Ranked here, below your own
++        // history/tabs, so real signal wins; these only fill open slots.
++        if !q.isEmpty {
++            for domain in TopDomains.matches(for: q, limit: 6) {
++                let url = "https://\(domain)"
++                guard seen.insert(url).inserted else { continue }
++                out.append(LauncherItem(id: "site-\(domain)",
++                                        title: domain,
++                                        url: url,
++                                        faviconURL: nil,
++                                        tabID: nil,
++                                        action: "Open"))
++            }
++        }
++
++        // Live search suggestions (keyless Google suggest). Ranked last so a
++        // user's own history/tabs and strong site matches win; these fill the
++        // remaining slots up to the overall cap.
++        if !rawQuery.isEmpty {
++            let rawLower = rawQuery.lowercased()
++            for suggestion in suggestions {
++                let s = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
++                guard !s.isEmpty, s.lowercased() != rawLower else { continue }
++                let key = "suggest:\(s.lowercased())"
++                guard seen.insert(key).inserted else { continue }
++                out.append(LauncherItem(id: key,
++                                        title: s,
++                                        url: store.settings.searchURL(for: s),
++                                        faviconURL: nil,
++                                        tabID: nil,
++                                        action: "Search",
++                                        iconSystemName: "magnifyingglass",
++                                        subtitle: nil))
++            }
+         }
+ 
+         return Array(out.prefix(8))
+@@ -780,79 +1246,185 @@ private struct LauncherRow: View {
+     let action: () -> Void
+ 
+     @Environment(\.palette) private var p
+-    @State private var hovering = false
+-
+-    /// Tab rows advertise "Switch to Tab" at all times (dimmed at rest);
+-    /// open/search rows only reveal their affordance once active.
+-    private var showsAction: Bool {
+-        item.tabID != nil || isHighlighted || hovering
+-    }
+ 
+     var body: some View {
+         Button(action: action) {
+-            HStack(spacing: 11) {
++            HStack(spacing: 12) {
+                 icon
+ 
+                 Text(item.title.isEmpty ? item.url : item.title)
+                     .font(Typography.ui(15, weight: .medium))
+-                    .foregroundStyle(isHighlighted ? Color.white : p.foreground.color)
++                    .foregroundStyle(p.foreground.color)
+                     .lineLimit(1)
+                     .truncationMode(.tail)
++                    .layoutPriority(1)
+ 
+                 Spacer(minLength: 12)
+ 
+-                if showsAction { trailing }
++                if let sub = item.subtitle, !sub.isEmpty {
++                    HStack(spacing: 5) {
++                        Text("—")
++                            .foregroundStyle(p.mutedForeground.color.opacity(0.45))
++                        Text(sub)
++                            .foregroundStyle(p.mutedForeground.color.opacity(0.75))
++                            .lineLimit(1)
++                            .truncationMode(.middle)
++                    }
++                    .font(Typography.ui(Typography.base, weight: .regular))
++                    .frame(maxWidth: 280, alignment: .trailing)
++                    .layoutPriority(0)
++                }
+             }
+             .padding(.horizontal, LauncherMetrics.rowInnerPadding)
+             .frame(height: LauncherMetrics.rowHeight)
+             .background(
+                 RoundedRectangle(cornerRadius: LauncherMetrics.rowCorner, style: .continuous)
+-                    .fill(isHighlighted ? LauncherMetrics.accent : .clear)
++                    .fill(isHighlighted ? LauncherMetrics.highlightFill(scheme) : .clear)
+             )
+             .contentShape(Rectangle())
+         }
+         .buttonStyle(.plain)
+-        .onHover { hovering = $0 }
+         .animation(Motion.state, value: isHighlighted)
+     }
+ 
+-    /// Leading glyph: a command's SF symbol or the page favicon. On the
+-    /// highlighted (blue) row it sits on a white tile so dark marks stay legible.
++    /// Leading glyph (20pt): a command/search SF symbol, or the page favicon
++    /// (which falls back to a globe for sites without a decoded icon).
+     @ViewBuilder private var icon: some View {
+-        ZStack {
+-            if isHighlighted {
+-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+-                    .fill(Color.white)
+-                    .frame(width: 30, height: 30)
+-            }
++        Group {
+             if let sys = item.iconSystemName {
+-                Icon(name: sys, size: 17, weight: .medium)
+-                    .foregroundStyle(isHighlighted
+-                        ? LauncherMetrics.accent : p.foreground.color.opacity(0.85))
++                Icon(name: sys, size: 18, weight: .medium)
++                    .foregroundStyle(p.mutedForeground.color)
+             } else {
+                 Favicon(icon: item.faviconURL, page: item.url, size: 20)
+             }
+         }
+-        .frame(width: 30, height: 30)
++        .frame(width: 24, height: 24)
+     }
++}
+ 
+-    private var trailing: some View {
+-        HStack(spacing: 7) {
+-            Text(item.action)
+-                .font(Typography.ui(Typography.small, weight: .medium))
+-                .foregroundStyle(isHighlighted ? Color.white
+-                                                : p.mutedForeground.color.opacity(0.7))
++// MARK: - Attachment picker + chips
+ 
+-            Icon(name: "arrow.right", size: 11, weight: .semibold)
+-                .foregroundStyle(isHighlighted ? Color.white
+-                                               : p.mutedForeground.color.opacity(0.7))
+-                .frame(width: 22, height: 22)
+-                .background(
+-                    RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+-                        .fill(isHighlighted ? Color.white.opacity(0.22)
+-                                            : p.foreground.color.opacity(0.07))
+-                )
++/// Popover for "Add tabs or files": a multi-select list of open tabs plus a
++/// file chooser. Selections flow back through the bound arrays and render as
++/// chips in the launcher.
++private struct AttachPicker: View {
++    @ObservedObject var store: BrowserStore
++    @Binding var attachedTabIDs: [UUID]
++    @Binding var attachedFiles: [URL]
++    let chooseFiles: () -> Void
++    @Environment(\.palette) private var p
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: 10) {
++            Text("Add context")
++                .font(Typography.ui(13, weight: .semibold))
++                .foregroundStyle(p.popoverForeground.color)
++
++            if store.tabs.isEmpty {
++                Text("No open tabs")
++                    .font(Typography.ui(Typography.base))
++                    .foregroundStyle(.secondary)
++            } else {
++                ScrollView {
++                    VStack(spacing: 2) {
++                        ForEach(store.tabs) { tab in
++                            tabRow(tab)
++                        }
++                    }
++                }
++                .frame(maxHeight: 240)
++            }
++
++            Divider().opacity(0.5)
++
++            Button(action: chooseFiles) {
++                HStack(spacing: 7) {
++                    Icon(name: "folder", size: 14, weight: .medium)
++                    Text("Choose files…")
++                        .font(Typography.ui(Typography.base, weight: .medium))
++                }
++                .foregroundStyle(p.foreground.color)
++                .frame(maxWidth: .infinity, alignment: .leading)
++                .padding(.horizontal, 8)
++                .padding(.vertical, 7)
++                .contentShape(Rectangle())
++            }
++            .buttonStyle(.plain)
++        }
++        .padding(12)
++        .frame(width: 300)
++        .background(p.popover.color)
++    }
++
++    @ViewBuilder private func tabRow(_ tab: BrowserTab) -> some View {
++        let selected = attachedTabIDs.contains(tab.id)
++        Button {
++            if selected {
++                attachedTabIDs.removeAll { $0 == tab.id }
++            } else {
++                attachedTabIDs.append(tab.id)
++            }
++        } label: {
++            HStack(spacing: 9) {
++                Favicon(icon: tab.faviconURL, page: tab.displayURL, size: 16)
++                    .frame(width: 18, height: 18)
++                Text(tab.displayTitle)
++                    .font(Typography.ui(Typography.base))
++                    .foregroundStyle(p.popoverForeground.color)
++                    .lineLimit(1)
++                Spacer(minLength: 8)
++                Icon(name: selected ? "checkmark.circle.fill" : "circle",
++                     size: 15, weight: .medium)
++                    .foregroundStyle(selected ? LauncherMetrics.accent
++                                              : p.mutedForeground.color.opacity(0.5))
++            }
++            .padding(.horizontal, 8)
++            .padding(.vertical, 6)
++            .contentShape(Rectangle())
++            .background(
++                RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
++                    .fill(selected ? LauncherMetrics.accent.opacity(0.08) : .clear)
++            )
++        }
++        .buttonStyle(.plain)
++    }
++}
++
++/// A compact removable chip for one attached tab or file.
++private struct AttachmentChip: View {
++    let label: String
++    let faviconURL: String?
++    let page: String?
++    let systemIcon: String?
++    let onRemove: () -> Void
++    @Environment(\.palette) private var p
++
++    var body: some View {
++        HStack(spacing: 5) {
++            if let systemIcon {
++                Icon(name: systemIcon, size: 11, weight: .medium)
++                    .foregroundStyle(p.mutedForeground.color)
++            } else {
++                Favicon(icon: faviconURL, page: page ?? "", size: 13)
++                    .frame(width: 13, height: 13)
++            }
++            Text(label)
++                .font(Typography.ui(Typography.label, weight: .medium))
++                .foregroundStyle(p.foreground.color)
++                .lineLimit(1)
++                .frame(maxWidth: 140)
++            Button(action: onRemove) {
++                Icon(name: "xmark", size: 9, weight: .bold)
++                    .foregroundStyle(p.mutedForeground.color)
++                    .padding(2)
++                    .contentShape(Rectangle())
++            }
++            .buttonStyle(.plain)
+         }
+-        .fixedSize()
++        .padding(.leading, 8)
++        .padding(.trailing, 5)
++        .padding(.vertical, 5)
++        .background(Capsule(style: .continuous).fill(p.foreground.color.opacity(0.06)))
++        .overlay(Capsule().strokeBorder(p.border.color.opacity(0.4), lineWidth: 1))
+     }
+ }
+diff --git a/chrome/browser/ui/mori/MoriRoot.swift b/chrome/browser/ui/mori/MoriRoot.swift
+index e3d6e11f45..3bcf24c329 100644
+--- a/chrome/browser/ui/mori/MoriRoot.swift
++++ b/chrome/browser/ui/mori/MoriRoot.swift
+@@ -322,4 +322,31 @@ final class MoriRoot: NSObject {
+     @objc static func selectNextTab() { shared?.store.selectNextTab() }
+     @objc static func selectPreviousTab() { shared?.store.selectPreviousTab() }
+ 
++    // Menu-bar Tab/View actions that operate on the current tab. Thin wrappers
++    // over the same BrowserStore calls the keyboard shortcuts use (see
++    // ShortcutRegistry.swift), so the AppKit menu bar and ⌘-shortcuts stay in
++    // lockstep. All guard on an existing store/tab and no-op otherwise.
++    @objc static func duplicateCurrentTab() {
++        guard let store = shared?.store, let id = store.selectedTabID else { return }
++        _ = store.duplicateTab(id)
++    }
++    @objc static func togglePinCurrentTab() {
++        guard let store = shared?.store, let id = store.selectedTabID else { return }
++        store.togglePin(id)
++    }
++    @objc static func toggleMuteCurrentTab() { shared?.store.selectedTab?.toggleMute() }
++    @objc static func closeTabsToRightOfCurrent() {
++        guard let store = shared?.store, let id = store.selectedTabID else { return }
++        store.closeTabsToRight(of: id)
++    }
++    @objc static func newSplit() { shared?.store.newSplit() }
++
++    /// Keep every main-menu item that we retarget at [MoriRoot class] (see
++    /// InstallMillieMenuActions in mori_chrome_bridge.mm) enabled. With the menu
++    /// bar's autoenablesItems = YES, AppKit re-validates each item when its menu
++    /// opens; without this it would grey our retargeted items back out. All the
++    /// actions no-op safely when there is no active tab, so always-enabled is
++    /// correct for Millie.
++    @objc static func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { true }
++
+ }
+diff --git a/chrome/browser/ui/mori/mori_adblock.mm b/chrome/browser/ui/mori/mori_adblock.mm
+index 4d68bf6900..e48118c0d3 100644
+--- a/chrome/browser/ui/mori/mori_adblock.mm
++++ b/chrome/browser/ui/mori/mori_adblock.mm
+@@ -1,5 +1,10 @@
+ // Millie built-in ad/tracker blocker. See mori_adblock.h.
+ 
++#ifdef UNSAFE_BUFFERS_BUILD
++#pragma allow_unsafe_buffers
++#pragma allow_unsafe_libc_calls
++#endif
++
+ #import <Foundation/Foundation.h>
+ 
+ #include <algorithm>
+diff --git a/chrome/browser/ui/mori/mori_browser_window.h b/chrome/browser/ui/mori/mori_browser_window.h
+index aff28f8c37..0c4e27bb1f 100644
+--- a/chrome/browser/ui/mori/mori_browser_window.h
++++ b/chrome/browser/ui/mori/mori_browser_window.h
+@@ -67,8 +67,11 @@ class MoriLocationBar : public LocationBar {
+   OmniboxView* GetOmniboxView() override;
+   OmniboxController* GetOmniboxController() override;
+   // 150 added GetOmniboxPopupView() as a pure virtual on LocationBar; the Mori
+-  // stub has no omnibox popup view, so return null.
+-  OmniboxPopupView* GetOmniboxPopupView() override { return nullptr; }
++  // stub has no omnibox popup view, so return null (body in the .mm — an inline
++  // virtual body trips chromium-style).
++  OmniboxPopupView* GetOmniboxPopupView() override;
++  // 153 added AnnounceAlert() as a pure virtual on LocationBar; no-op here.
++  void AnnounceAlert(const std::u16string& announcement) override;
+   bool ShouldCloseOmniboxPopup(ui::MouseEvent* event) override;
+   content::WebContents* GetWebContents() override;
+   LocationBarModel* GetLocationBarModel() override;
+@@ -149,7 +152,7 @@ class MoriExclusiveAccessContext : public ExclusiveAccessContext {
+ // what makes Chrome's real dialog widgets work without a BrowserView.
+ class MoriModalDialogHost : public web_modal::WebContentsModalDialogHost {
+  public:
+-  MoriModalDialogHost() = default;
++  MoriModalDialogHost();
+   ~MoriModalDialogHost() override;
+ 
+   gfx::NativeView GetHostView() const override;
+@@ -211,9 +214,12 @@ class MoriBrowserWindow : public BrowserWindow {
+   void OnTabDetached(content::WebContents* contents, bool was_active) override;
+   gfx::Size GetContentsSize() const override;
+   void SetContentsSize(const gfx::Size& size) override;
+-  void UpdatePageActionIcon(PageActionIconType type) override;
++  // 153 removed UpdatePageActionIcon / ExecutePageActionIconForTesting from the
++  // BrowserWindow interface; kept as no-op members (definitions remain in the
++  // .mm) but no longer 'override'.
++  void UpdatePageActionIcon(PageActionIconType type);
+   autofill::AutofillBubbleHandler* GetAutofillBubbleHandler() override;
+-  void ExecutePageActionIconForTesting(PageActionIconType type) override;
++  void ExecutePageActionIconForTesting(PageActionIconType type);
+   LocationBar* GetLocationBar() const override;
+   void SetFocusToLocationBar(bool is_user_initiated) override;
+   void UpdateReloadStopState(bool is_loading, bool force) override;
+diff --git a/chrome/browser/ui/mori/mori_browser_window.mm b/chrome/browser/ui/mori/mori_browser_window.mm
+index a2300f4338..4d236ffee7 100644
+--- a/chrome/browser/ui/mori/mori_browser_window.mm
++++ b/chrome/browser/ui/mori/mori_browser_window.mm
+@@ -8,6 +8,7 @@
+ 
+ #include "base/strings/sys_string_conversions.h"
+ #include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+ #include "chrome/browser/ui/unload_controller.h"  // UnloadController::From / DownloadCloseType (M152)
+ #include "chrome/browser/ui/mori/mori_chrome_hooks.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+@@ -158,6 +159,12 @@ void ConfigureDisclosureLabel(NSTextField* label,
+   return nullptr;
+ }
+ 
++OmniboxPopupView* MoriLocationBar::GetOmniboxPopupView() {
++  return nullptr;
++}
++
++void MoriLocationBar::AnnounceAlert(const std::u16string& announcement) {}
++
+ OmniboxController* MoriLocationBar::GetOmniboxController() {
+   return nullptr;
+ }
+@@ -481,11 +488,25 @@ void ConfigureDisclosureLabel(NSTextField* label,
+ }
+ 
+ MoriBrowserWindow::~MoriBrowserWindow() {
++  // 153 contract: each BrowserWindow implementation must run the pre-destruction
++  // teardown of BrowserWindowFeatures while it (and the Browser) are still alive.
++  // Browser::~Browser() resets window_ (this) BEFORE features_, and the vanilla
++  // windows (BrowserWidget::~, WebUIBrowserWindow::~) call this here. Without it,
++  // features_ later destructs its members in raw reverse-declaration order,
++  // freeing immersive_mode_controller_ before ContextualTasksCloseButtonController
++  // (which observes it via ScopedObservation) -> use-after-free on window close.
++  // TearDownPreBrowserWindowDestruction() resets contextual_tasks_* first, then
++  // immersive_mode_controller_, in the safe order.
++  if (browser_) {
++    browser_->GetFeatures().TearDownPreBrowserWindowDestruction();
++  }
+   mori::OnBrowserWindowDestroyed(browser_);
+ }
+ 
+ // --- MoriModalDialogHost ----------------------------------------------------
+ 
++MoriModalDialogHost::MoriModalDialogHost() = default;
++
+ MoriModalDialogHost::~MoriModalDialogHost() {
+   for (auto& observer : observers_) {
+     observer.OnHostDestroying();
+diff --git a/chrome/browser/ui/mori/mori_chrome_bridge.mm b/chrome/browser/ui/mori/mori_chrome_bridge.mm
+index 6183f9927f..fca2856b79 100644
+--- a/chrome/browser/ui/mori/mori_chrome_bridge.mm
++++ b/chrome/browser/ui/mori/mori_chrome_bridge.mm
+@@ -5,6 +5,7 @@
+ 
+ #import "chrome/browser/ui/mori/MoriBrowserView.h"
+ #import "chrome/browser/ui/mori/MoriPrivacy.h"
++#import <objc/message.h>
+ #include "chrome/browser/ui/mori/mori_adblock.h"
+ #include "chrome/browser/ui/mori/mori_chrome_hooks.h"
+ 
+@@ -36,6 +37,8 @@
+ #include "chrome/browser/shell_integration.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
++#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/navigator/browser_navigator.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+@@ -62,6 +65,7 @@
+ // headless Browser (own cookies/cache/storage). See CONTEXT_ISOLATION_DESIGN.md.
+ #include <map>
+ #include "chrome/browser/browser_process.h"
++#include "chrome/browser/lifetime/browser_shutdown.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+@@ -71,6 +75,15 @@
+ #include "content/public/browser/download_manager.h"
+ #include "components/download/public/common/download_item.h"
+ #include "content/public/browser/web_contents_observer.h"
++// Auto picture-in-picture (document-PiP) for conferencing apps (Meet/Zoom/Teams).
++// Millie attaches the tab helper itself and pre-grants the content setting since
++// its headless, Views-less Browser bypasses the usual UI permission flow.
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.h"
++#include "components/content_settings/core/browser/host_content_settings_map.h"
++#include "components/content_settings/core/common/content_settings.h"
++#include "components/content_settings/core/common/content_settings_pattern.h"
++#include "components/content_settings/core/common/content_settings_types.h"
+ #include "base/task/thread_pool.h"
+ #include "services/network/public/mojom/clear_data_filter.mojom.h"
+ #include "services/network/public/mojom/cookie_manager.mojom.h"
+@@ -101,6 +114,27 @@ + (BOOL)uiReady;
+ + (void)goBack;
+ + (void)goForward;
+ + (void)toggleSidebar;
++// Menu-bar command targets (see HandleBrowserCommand). All defined in
++// MoriRoot.swift and safe no-ops when there is no active tab/store.
+++ (void)reload;
+++ (void)forceReload;
+++ (void)stop;
+++ (void)goHome;
+++ (void)zoomIn;
+++ (void)zoomOut;
+++ (void)resetZoom;
+++ (void)toggleFindBar;
+++ (void)findNext;
+++ (void)findPrevious;
+++ (void)toggleDevTools;
+++ (void)printPage;
+++ (void)selectNextTab;
+++ (void)selectPreviousTab;
+++ (void)duplicateCurrentTab;
+++ (void)togglePinCurrentTab;
+++ (void)toggleMuteCurrentTab;
+++ (void)closeTabsToRightOfCurrent;
+++ (void)newSplit;
+ @end
+ 
+ @class MoriBrowserView;
+@@ -114,6 +148,17 @@ @interface NSView (MoriRendererKeyForwarding)
+ - (NSInteger)keyEvent:(NSEvent*)event;
+ @end
+ 
++// Menu delegate that keeps Millie's retargeted main-menu commands enabled and
++// pointed at MoriRoot. It re-applies on every open (menuNeedsUpdate: fires
++// synchronously, before AppKit's automatic enabling), so it beats Chrome's
++// continuous command-state pushes that otherwise grey these items back out.
++// Installed on each submenu that holds a mapped command (see +installOnMainMenu),
++// chaining any existing delegate (e.g. the History/Tab/Bookmark bridges).
++@interface MoriMenuEnabler : NSObject <NSMenuDelegate>
++@property(nonatomic, weak) id<NSMenuDelegate> previousDelegate;
+++ (void)installOnMainMenu;
++@end
++
+ // ---------------------------------------------------------------------------
+ // Globals
+ 
+@@ -126,11 +171,11 @@ - (NSInteger)keyEvent:(NSEvent*)event;
+ // Each is bound to its own persistent Chromium Profile (isolated cookies/cache/
+ // storage) and is never shown — its tabs' native views are reparented into the
+ // single visible Millie window. Created lazily; erased when the Browser dies.
+-std::map<std::string, Browser*> g_profile_browsers;
++base::NoDestructor<std::map<std::string, Browser*>> g_profile_browsers;
+ // The active Space's profile key, pushed from Swift on context switch. Resolves
+ // which profile extension install/enumeration/management operate on, so each
+ // Profile keeps its own extension set (Arc model). "default" = primary profile.
+-std::string g_active_profile_key = "default";
++base::NoDestructor<std::string> g_active_profile_key("default");
+ // True while a MoriBrowserView is synchronously creating its own tab via
+ // Navigate() — the TabStripModel insert observer must not treat that insert
+ // as an engine-created orphan (it fires before the view can register).
+@@ -154,9 +199,65 @@ - (NSInteger)keyEvent:(NSEvent*)event;
+   return bwi ? bwi->GetBrowserForMigrationOnly() : nullptr;
+ }
+ 
++// Pre-grant the AUTO_PICTURE_IN_PICTURE content setting to ALLOW for the major
++// video-conferencing origins so Chrome's AutoPictureInPictureTabHelper will
++// auto-open a document-PiP window when the user switches away from the call tab.
++//
++// Why seed instead of relying on the default ("ask") + media-engagement:
++//   * In an Incognito/OTR Space, "ask" is treated as BLOCK by the tab helper
++//     (IsEligibleForAutoPictureInPicture), so conferencing PiP would never fire.
++//   * The normal "ask" -> allow path shows AutoPipSettingHelper's overlay bubble,
++//     which is a Views UI Millie's headless (Views-less) Browser can't present.
++//   * ALLOW also lets MeetsMediaEngagementConditions() short-circuit for the
++//     video-playback path without accrued media engagement.
++// Seeding ALLOW makes auto-PiP deterministic for these hosts across every Space.
++//
++// Idempotent: re-setting the same (pattern, ALLOW) value is a no-op, and we also
++// skip profiles we've already seeded this session. Must run on the UI thread
++// (HostContentSettingsMap requirement) — all callers are UI-thread browser setup.
++void MoriSeedAutoPipContentSettings(Profile* profile) {
++  if (!profile) {
++    return;
++  }
++  static base::NoDestructor<std::set<Profile*>> seeded;
++  if (!seeded->insert(profile).second) {
++    return;  // Already seeded this Profile.
++  }
++  HostContentSettingsMap* settings_map =
++      HostContentSettingsMapFactory::GetForProfile(profile);
++  if (!settings_map) {
++    return;
++  }
++  // `[*.]host` matches the host and all its subdomains; plain host matches only
++  // that host. Secondary pattern is Wildcard so it matches the tab helper's
++  // GetContentSetting(url, url, ...) lookup regardless of scoping.
++  static const char* const kConferencingPatterns[] = {
++      "https://meet.google.com",     // Google Meet
++      "https://[*.]zoom.us",         // Zoom (zoom.us + *.zoom.us)
++      "https://teams.microsoft.com", // Microsoft Teams (work/school)
++      "https://teams.live.com",      // Microsoft Teams (personal)
++      "https://[*.]webex.com",       // Cisco Webex (webex.com + *.webex.com)
++  };
++  for (const char* spec : kConferencingPatterns) {
++    ContentSettingsPattern primary = ContentSettingsPattern::FromString(spec);
++    if (!primary.IsValid()) {
++      NSLog(@"MORI autopip: invalid content-setting pattern %s", spec);
++      continue;
++    }
++    settings_map->SetContentSettingCustomScope(
++        primary, ContentSettingsPattern::Wildcard(),
++        ContentSettingsType::AUTO_PICTURE_IN_PICTURE, CONTENT_SETTING_ALLOW);
++  }
++  NSLog(@"MORI autopip: seeded AUTO_PICTURE_IN_PICTURE=ALLOW for conferencing "
++        @"hosts on profile=%p (otr=%d)",
++        profile, profile->IsOffTheRecord());
++}
++
+ std::map<content::WebContents*, __weak MoriBrowserView*>& ViewMap() {
+-  static std::map<content::WebContents*, __weak MoriBrowserView*> map;
+-  return map;
++  static base::NoDestructor<
++      std::map<content::WebContents*, __weak MoriBrowserView*>>
++      map;
++  return *map;
+ }
+ 
+ // Tabs created by the engine (window.open, chrome.tabs.create) waiting for a
+@@ -171,8 +272,8 @@ - (NSInteger)keyEvent:(NSEvent*)event;
+   base::TimeTicks stashed_at;
+ };
+ std::multimap<std::string, OrphanEntry>& OrphanMap() {
+-  static std::multimap<std::string, OrphanEntry> map;
+-  return map;
++  static base::NoDestructor<std::multimap<std::string, OrphanEntry>> map;
++  return *map;
+ }
+ 
+ // An orphan older than this is never adopted (it's pruned instead). Generous
+@@ -191,13 +292,13 @@ void DetachMoriWebContentsDelegates(Browser* browser) {
+   }
+   for (auto& entry : ViewMap()) {
+     content::WebContents* contents = entry.first;
+-    if (contents && contents->GetDelegate() == browser) {
++    if (contents && contents->GetDelegate() == BrowserWebContentsDelegate::From(browser)) {
+       contents->SetDelegate(nullptr);
+     }
+   }
+   for (auto& entry : OrphanMap()) {
+     content::WebContents* contents = entry.second.contents;
+-    if (contents && contents->GetDelegate() == browser) {
++    if (contents && contents->GetDelegate() == BrowserWebContentsDelegate::From(browser)) {
+       contents->SetDelegate(nullptr);
+     }
+   }
+@@ -356,6 +457,90 @@ void InstallStandardEditMenuShortcuts() {
+                    NSEventModifierFlagCommand);
+ }
+ 
++// Maps a standard Chrome main-menu command id to the MoriRoot class selector
++// that performs the equivalent Millie action, or nullptr if Millie has no
++// equivalent (those items are left as-is / disabled on purpose). Returns no-arg
++// selectors on MoriRoot (all @objc static funcs), matching the Toggle Sidebar
++// retargeting below.
++// Maps a Chrome main-menu IDC command tag to the matching MoriRoot *class*
++// selector (0-arg @objc static funcs). These are dispatched/validated with an
++// explicit target = [MoriRoot class] (see applyToMenu:), exactly like the
++// working "Toggle Sidebar" item — NOT via the responder chain. Millie's visible
++// window is a plain NSWindow with no Views CommandDispatchingWindow, so target=nil
++// commandDispatch: items find no handler and AppKit greys them out; an explicit
++// class target that responds to the selector validates YES and fires directly.
++SEL MoriSelectorForCommand(NSInteger tag) {
++  switch (tag) {
++    // Edit ▸ Find
++    case IDC_FIND:                 return @selector(toggleFindBar);
++    case IDC_FIND_NEXT:            return @selector(findNext);
++    case IDC_FIND_PREVIOUS:        return @selector(findPrevious);
++    case IDC_FOCUS_SEARCH:         return @selector(focusOmnibox);
++    // View ▸ reload / stop / zoom
++    case IDC_STOP:                 return @selector(stop);
++    case IDC_RELOAD:               return @selector(reload);
++    case IDC_RELOAD_BYPASSING_CACHE:
++    case IDC_RELOAD_CLEARING_CACHE: return @selector(forceReload);
++    case IDC_ZOOM_PLUS:            return @selector(zoomIn);
++    case IDC_ZOOM_MINUS:           return @selector(zoomOut);
++    case IDC_ZOOM_NORMAL:          return @selector(resetZoom);
++    // View ▸ Developer
++    case IDC_DEV_TOOLS:
++    case IDC_DEV_TOOLS_INSPECT:
++    case IDC_DEV_TOOLS_CONSOLE:    return @selector(toggleDevTools);
++    // File ▸ Print, Close Tab
++    case IDC_PRINT:
++    case IDC_BASIC_PRINT:          return @selector(printPage);
++    case IDC_CLOSE_TAB:            return @selector(closeCurrentTab);
++    // History ▸ Home / Back / Forward
++    case IDC_HOME:                 return @selector(goHome);
++    case IDC_BACK:                 return @selector(goBack);
++    case IDC_FORWARD:              return @selector(goForward);
++    // Tab menu
++    case IDC_CYCLE_TO_NEXT_TAB:    return @selector(selectNextTab);
++    case IDC_CYCLE_TO_PREV_TAB:    return @selector(selectPreviousTab);
++    case IDC_DUPLICATE_TAB:
++    case IDC_DUPLICATE_TARGET_TAB: return @selector(duplicateCurrentTab);
++    case IDC_WINDOW_MUTE_SITE:
++    case IDC_MUTE_TARGET_SITE:     return @selector(toggleMuteCurrentTab);
++    case IDC_WINDOW_PIN_TAB:
++    case IDC_PIN_TARGET_TAB:       return @selector(togglePinCurrentTab);
++    case IDC_WINDOW_CLOSE_TABS_TO_RIGHT:
++                                   return @selector(closeTabsToRightOfCurrent);
++    case IDC_NEW_SPLIT_TAB:        return @selector(newSplit);
++    default:                       return nullptr;
++  }
++}
++
++// Run the MoriRoot action for a Chrome main-menu command tag. Returns true if
++// the tag is a browser command Millie services (and dispatched it), false
++// otherwise. MoriSelectorForCommand is the single source of truth for the
++// mapping; every selector it returns is a 0-arg, void @objc class method on
++// MoriRoot, so a plain objc_msgSend invokes it.
++bool MoriRunBrowserCommand(NSInteger tag) {
++  SEL sel = MoriSelectorForCommand(tag);
++  if (!sel) {
++    return false;
++  }
++  using MoriVoidClassMethod = void (*)(id, SEL);
++  ((MoriVoidClassMethod)objc_msgSend)((id)[MoriRoot class], sel);
++  return true;
++}
++
++// Re-point the standard Chrome main-menu items that Millie can service directly
++// at MoriRoot class selectors, exactly as InstallSidebarMenuShortcut does for
++// Toggle Sidebar. This is the only menu path that works in Millie: the visible
++// window is a plain NSWindow (no Views CommandDispatchingWindow), so Chrome's
++// `commandDispatch:` items have no reachable command handler and AppKit greys
++// them out. An explicit target+action is validated/dispatched directly against
++// [MoriRoot class], independent of the key window, so the items light up and
++// invoke the matching SwiftUI action. Items with no Millie equivalent (Save
++// Page As, View Source, Bookmark This/All Tab, Cast, Group Tab, Move Tab to New
++// Window, Search Tabs, …) are left untouched and stay disabled on purpose.
++[[maybe_unused]] void InstallMillieMenuActions() {
++  [MoriMenuEnabler installOnMainMenu];
++}
++
+ void InstallSidebarMenuShortcut() {
+   NSMenu* mainMenu = NSApp.mainMenu;
+   if (!mainMenu) {
+@@ -450,6 +635,156 @@ id NSObjectFromValue(const base::Value& value) {
+ 
+ }  // namespace
+ 
++@implementation MoriMenuEnabler
++
++@synthesize previousDelegate = _previousDelegate;
++
++// NSMenu.delegate is a weak reference, so keep our enablers alive for the app
++// lifetime.
++static NSMutableArray<MoriMenuEnabler*>* MoriMenuEnablers() {
++  static NSMutableArray<MoriMenuEnabler*>* enablers = [NSMutableArray array];
++  return enablers;
++}
++
+++ (void)installOnMainMenu {
++  NSMenu* mainMenu = NSApp.mainMenu;
++  if (!mainMenu) {
++    return;
++  }
++  // Walk every menu/submenu; on each one that holds at least one command Millie
++  // services, ensure our enabler is the delegate and re-apply the retargeting.
++  NSMutableArray<NSMenu*>* pending = [NSMutableArray arrayWithObject:mainMenu];
++  while (pending.count > 0) {
++    NSMenu* menu = pending.lastObject;
++    [pending removeLastObject];
++    BOOL hasMapped = NO;
++    for (NSMenuItem* item in menu.itemArray) {
++      if (item.submenu) {
++        [pending addObject:item.submenu];
++      }
++      if (MoriSelectorForCommand(item.tag) && !item.isAlternate) {
++        hasMapped = YES;
++      }
++    }
++    if (!hasMapped) {
++      continue;
++    }
++    // If our enabler is already this menu's delegate (Chrome hasn't rebuilt it),
++    // just re-apply. Otherwise wrap the current delegate so Chrome's dynamic
++    // bridges still run, then apply.
++    if ([menu.delegate isKindOfClass:[MoriMenuEnabler class]]) {
++      [(MoriMenuEnabler*)menu.delegate applyToMenu:menu];
++      continue;
++    }
++    MoriMenuEnabler* enabler = [[MoriMenuEnabler alloc] init];
++    enabler.previousDelegate = menu.delegate;  // chain any existing bridge
++    [MoriMenuEnablers() addObject:enabler];
++    menu.delegate = enabler;
++    [enabler applyToMenu:menu];
++  }
++
++  // Chrome rebuilds the main menu and restores its own disabled commandDispatch:
++  // items whenever the app is activated / a window becomes main (AppController's
++  // windowDidBecomeMain: path). Re-run this walk on those notifications — they
++  // fire reliably for a menu-bar app, and because Chrome's AppController
++  // registered its observers first, ours runs afterward and wins. (The menu bar
++  // is drawn by the system, so NSMenuDidBeginTracking is not posted for it.)
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
++    void (^reapply)(NSNotification*) = ^(NSNotification* note) {
++      [MoriMenuEnabler installOnMainMenu];
++    };
++    [nc addObserverForName:NSApplicationDidBecomeActiveNotification
++                    object:nil
++                     queue:nil
++                usingBlock:reapply];
++    [nc addObserverForName:NSWindowDidBecomeMainNotification
++                    object:nil
++                     queue:nil
++                usingBlock:reapply];
++  });
++}
++
++// Swap each mapped Chrome command item for a fresh plain NSMenuItem targeting
++// [MoriRoot class] (the Toggle Sidebar pattern — the only menu wiring that works
++// in Millie's plain-NSWindow setup). Re-applied on each open in case Chrome
++// rebuilds the items.
++- (void)applyToMenu:(NSMenu*)menu {
++  // Collect the mapped Chrome items first (don't mutate while iterating).
++  NSMutableArray<NSMenuItem*>* toReplace = [NSMutableArray array];
++  for (NSMenuItem* item in menu.itemArray) {
++    if (item.isAlternate) {
++      continue;
++    }
++    if (MoriSelectorForCommand(item.tag)) {
++      [toReplace addObject:item];
++    }
++  }
++  // Replace each Chrome-built command item with a fresh, plain NSMenuItem
++  // targeting [MoriRoot class] — exactly like the working Toggle Sidebar item.
++  // Mutating the existing Chrome item (target/action/enabled/tag) does NOT
++  // stick: Chrome rebuilds these menus (on app activation / when a browser
++  // window becomes key) and restores its own disabled commandDispatch: items,
++  // dropping both our edits and our delegate. We therefore re-run this on every
++  // menu-bar tracking session (see the NSMenuDidBeginTracking observer), which
++  // fires after Chrome's rebuild. A fresh item Chrome does not own stays
++  // enabled and dispatches straight to MoriRoot.
++  for (NSMenuItem* oldItem in toReplace) {
++    NSInteger idx = [menu indexOfItem:oldItem];
++    if (idx < 0) {
++      continue;
++    }
++    SEL sel = MoriSelectorForCommand(oldItem.tag);
++    NSMenuItem* newItem =
++        [[NSMenuItem alloc] initWithTitle:oldItem.title
++                                   action:sel
++                            keyEquivalent:oldItem.keyEquivalent];
++    newItem.keyEquivalentModifierMask = oldItem.keyEquivalentModifierMask;
++    newItem.target = (id)[MoriRoot class];
++    newItem.enabled = YES;
++    [menu removeItemAtIndex:idx];
++    [menu insertItem:newItem atIndex:idx];
++  }
++}
++
++- (void)menuNeedsUpdate:(NSMenu*)menu {
++  // Let any chained bridge (History/Tab/Bookmarks) rebuild its dynamic section
++  // first, then re-assert our commands on top.
++  if ([self.previousDelegate respondsToSelector:@selector(menuNeedsUpdate:)]) {
++    [self.previousDelegate menuNeedsUpdate:menu];
++  }
++  [self applyToMenu:menu];
++}
++
++// menuNeedsUpdate: only fires when the menu is marked dirty; menuWillOpen: fires
++// on every open, so re-assert here too (this is the one that actually runs when
++// the user or AppKit opens the menu).
++- (void)menuWillOpen:(NSMenu*)menu {
++  if ([self.previousDelegate respondsToSelector:@selector(menuWillOpen:)]) {
++    [self.previousDelegate menuWillOpen:menu];
++  }
++  [self applyToMenu:menu];
++}
++
++// Forward all other NSMenuDelegate callbacks to the chained delegate so the
++// bridges keep working.
++- (id)forwardingTargetForSelector:(SEL)aSelector {
++  if ([self.previousDelegate respondsToSelector:aSelector]) {
++    return self.previousDelegate;
++  }
++  return nil;
++}
++
++- (BOOL)respondsToSelector:(SEL)aSelector {
++  if ([super respondsToSelector:aSelector]) {
++    return YES;
++  }
++  return [self.previousDelegate respondsToSelector:aSelector];
++}
++
++@end
++
+ // Engine-facing surface of MoriBrowserView (called from the C++ observers).
+ @interface MoriBrowserView ()
+ - (void)engineAttachWebContents:(content::WebContents*)webContents;
+@@ -627,9 +962,9 @@ void OnTabStripModelChanged(
+       // profile), so popups/AddNewContents route into the matching tab strip
+       // instead of forcing a foreign-profile insert into the primary Browser.
+       if (Browser* owner = MoriFindBrowserWithTab(wc)) {
+-        wc->SetDelegate(owner);
++        wc->SetDelegate(BrowserWebContentsDelegate::From(owner));
+       } else if (g_mori_browser) {
+-        wc->SetDelegate(g_mori_browser);
++        wc->SetDelegate(BrowserWebContentsDelegate::From(g_mori_browser));
+       }
+       if (ViewMap().count(wc)) {
+         // A Millie-created tab arrived: the startup blank (if any) can go now
+@@ -853,22 +1188,24 @@ void EnsureOnePasswordNativeMessagingManifest() {
+ }
+ 
+ void OnBrowserWindowCreated(Browser* browser) {
+-  NSLog(@"MORI OnBrowserWindowCreated type=%d existing=%p", (int)browser->type(),
++  NSLog(@"MORI OnBrowserWindowCreated type=%d existing=%p", (int)browser->GetType(),
+         g_mori_browser);
+-  if (g_mori_browser || browser->type() != Browser::TYPE_NORMAL) {
++  if (g_mori_browser || browser->GetType() != Browser::TYPE_NORMAL) {
+     return;
+   }
+   g_mori_browser = browser;
+   browser->tab_strip_model()->AddObserver(MoriTabStripObserver());
++  // Pre-grant auto-PiP for conferencing hosts on the primary (default) profile.
++  MoriSeedAutoPipContentSettings(browser->GetProfile());
+   EnsureOnePasswordNativeMessagingManifest();
+   NSLog(@"MORI adopted browser %p", browser);
+ }
+ 
+ void OnBrowserWindowDestroyed(Browser* browser) {
+-  for (auto it = g_profile_browsers.begin(); it != g_profile_browsers.end();
++  for (auto it = g_profile_browsers->begin(); it != g_profile_browsers->end();
+        ++it) {
+     if (it->second == browser) {
+-      g_profile_browsers.erase(it);
++      g_profile_browsers->erase(it);
+       break;
+     }
+   }
+@@ -878,14 +1215,64 @@ void OnBrowserWindowDestroyed(Browser* browser) {
+   }
+ }
+ 
++}  // namespace mori  (reopened below after the window class)
++
++// Millie's main window. A plain NSWindow is always the tail of its own responder
++// chain — reached after every view but before NSApp / AppController — so it is
++// the one place that reliably services Chrome's target=nil `commandDispatch:`
++// main-menu items no matter what holds first responder (web content, the SwiftUI
++// sidebar, the launcher, or nothing at all). It runs the browser commands Millie
++// owns and forwards everything else to AppController so the app-level commands
++// (New Tab, New Window, …) keep working exactly as before.
++@interface MoriCommandWindow : NSWindow
++@end
++
++@implementation MoriCommandWindow
++- (void)commandDispatch:(id)sender {
++  if (MoriRunBrowserCommand([sender tag])) {
++    return;
++  }
++  id del = NSApp.delegate;
++  if ([del respondsToSelector:@selector(commandDispatch:)]) {
++    [del commandDispatch:sender];
++  }
++}
++- (void)commandDispatchUsingKeyModifiers:(id)sender {
++  if (MoriRunBrowserCommand([sender tag])) {
++    return;
++  }
++  id del = NSApp.delegate;
++  if ([del respondsToSelector:@selector(commandDispatchUsingKeyModifiers:)]) {
++    [del commandDispatchUsingKeyModifiers:sender];
++  }
++}
++- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
++  SEL action = [item action];
++  if (action == @selector(commandDispatch:) ||
++      action == @selector(commandDispatchUsingKeyModifiers:)) {
++    if (MoriSelectorForCommand([item tag])) {
++      return YES;  // a command Millie services — always available
++    }
++    id del = NSApp.delegate;  // forward app-level commands to AppController
++    if ([del respondsToSelector:@selector(validateUserInterfaceItem:)]) {
++      return [del validateUserInterfaceItem:item];
++    }
++    return NO;
++  }
++  return [super validateUserInterfaceItem:item];
++}
++@end
++
++namespace mori {
++
+ void EnsureMoriUIStarted(Browser* browser) {
+-  NSLog(@"MORI EnsureMoriUIStarted type=%d window=%p", (int)browser->type(),
++  NSLog(@"MORI EnsureMoriUIStarted type=%d window=%p", (int)browser->GetType(),
+         g_main_window);
+-  if (g_main_window || browser->type() != Browser::TYPE_NORMAL) {
++  if (g_main_window || browser->GetType() != Browser::TYPE_NORMAL) {
+     return;
+   }
+ 
+-  NSWindow* window = [[NSWindow alloc]
++  NSWindow* window = [[MoriCommandWindow alloc]
+       initWithContentRect:NSMakeRect(0, 0, 1280, 820)
+                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                           NSWindowStyleMaskMiniaturizable |
+@@ -1041,6 +1428,16 @@ void EnsureMoriUIStarted(Browser* browser) {
+   }
+   InstallStandardEditMenuShortcuts();
+   InstallSidebarMenuShortcut();
++  // NOTE: InstallMillieMenuActions() is intentionally disabled. Replacing or
++  // retagging Chrome's main-menu command items (to retarget them at MoriRoot)
++  // does not work — Chrome owns these items, rebuilds them on activation, and
++  // dispatches them through commandDispatch: — and it actively CRASHES: removing
++  // the IDC_NEW_TAB_TO_RIGHT / IDC_WINDOW_CLOSE_TABS_TO_RIGHT items breaks the
++  // CHECK_EQ(count, 2) in -[AppController onVerticalTabStripModeChanged:] on the
++  // next window-becomes-main. The correct fix is a commandDispatch:/
++  // validateUserInterfaceItem: router in the key window's responder chain backed
++  // by MoriRoot (leaving Chrome's items untouched). See follow-up work.
++  // InstallMillieMenuActions();
+ }
+ 
+ NSWindow* MoriMainWindow() {
+@@ -1116,12 +1513,54 @@ bool HandleBrowserCommand(int command_id) {
+     return false;  // UI not up — let Chrome's default command run
+   }
+   switch (command_id) {
++    // --- Original six (File menu / Spaces) ---
+     case IDC_NEW_TAB:              [MoriRoot newTab];           return true;
+     case IDC_NEW_WINDOW:           [MoriRoot newWindow];        return true;
+     case IDC_NEW_INCOGNITO_WINDOW: [MoriRoot newPrivateWindow]; return true;
+     case IDC_RESTORE_TAB:          [MoriRoot reopenClosedTab];  return true;
+     case IDC_FOCUS_LOCATION:       [MoriRoot focusOmnibox];     return true;
+     case IDC_CLOSE_TAB:            [MoriRoot closeCurrentTab];  return true;
++
++    // --- Find (Edit ▸ Find) ---
++    case IDC_FIND:                 [MoriRoot toggleFindBar];    return true;
++    case IDC_FIND_NEXT:            [MoriRoot findNext];         return true;
++    case IDC_FIND_PREVIOUS:        [MoriRoot findPrevious];     return true;
++    case IDC_FOCUS_SEARCH:         [MoriRoot focusOmnibox];     return true;
++
++    // --- Navigation / reload / zoom (View, History) ---
++    case IDC_BACK:                 [MoriRoot goBack];           return true;
++    case IDC_FORWARD:              [MoriRoot goForward];        return true;
++    case IDC_HOME:                 [MoriRoot goHome];           return true;
++    case IDC_RELOAD:               [MoriRoot reload];           return true;
++    case IDC_RELOAD_BYPASSING_CACHE:
++    case IDC_RELOAD_CLEARING_CACHE: [MoriRoot forceReload];     return true;
++    case IDC_STOP:                 [MoriRoot stop];             return true;
++    case IDC_ZOOM_PLUS:            [MoriRoot zoomIn];           return true;
++    case IDC_ZOOM_MINUS:           [MoriRoot zoomOut];          return true;
++    case IDC_ZOOM_NORMAL:          [MoriRoot resetZoom];        return true;
++
++    // --- Developer (View ▸ Developer) → Millie's DevTools ---
++    case IDC_DEV_TOOLS:
++    case IDC_DEV_TOOLS_INSPECT:
++    case IDC_DEV_TOOLS_CONSOLE:    [MoriRoot toggleDevTools];   return true;
++
++    // --- Print (File) ---
++    case IDC_PRINT:
++    case IDC_BASIC_PRINT:          [MoriRoot printPage];        return true;
++
++    // --- Tab menu actions on the current tab ---
++    case IDC_CYCLE_TO_NEXT_TAB:    [MoriRoot selectNextTab];     return true;
++    case IDC_CYCLE_TO_PREV_TAB:    [MoriRoot selectPreviousTab]; return true;
++    case IDC_DUPLICATE_TAB:
++    case IDC_DUPLICATE_TARGET_TAB: [MoriRoot duplicateCurrentTab]; return true;
++    case IDC_WINDOW_MUTE_SITE:
++    case IDC_MUTE_TARGET_SITE:     [MoriRoot toggleMuteCurrentTab]; return true;
++    case IDC_WINDOW_PIN_TAB:
++    case IDC_PIN_TARGET_TAB:       [MoriRoot togglePinCurrentTab];  return true;
++    case IDC_WINDOW_CLOSE_TABS_TO_RIGHT:
++                                   [MoriRoot closeTabsToRightOfCurrent]; return true;
++    case IDC_NEW_SPLIT_TAB:        [MoriRoot newSplit];          return true;
++
+     default:                       return false;
+   }
+ }
+@@ -1221,23 +1660,31 @@ bool HandleExternalProtocol(const GURL& url, bool has_user_gesture) {
+   if (key.empty() || key == "default") {
+     return g_mori_browser;
+   }
+-  auto it = g_profile_browsers.find(key);
+-  if (it != g_profile_browsers.end()) {
++  auto it = g_profile_browsers->find(key);
++  if (it != g_profile_browsers->end()) {
+     return it->second;
+   }
+   Profile* profile = MoriProfileFromKey(key);  // synchronous create/load
+   if (!profile) {
+     return g_mori_browser;
+   }
++  BrowserWindowInterface* browser_window = CreateBrowserWindow(
++      BrowserWindowCreateParams(profile, /*from_user_gesture=*/true));
+   Browser* browser =
+-      Browser::Create(Browser::CreateParams(profile, /*user_gesture=*/true));
++      browser_window ? browser_window->GetBrowserForMigrationOnly() : nullptr;
++  if (!browser) {
++    return g_mori_browser;
++  }
+   // Intentionally never call browser->window()->Show(): this is a headless tab
+   // container; its tabs' native views are reparented into the visible window.
+   // Observe its tab strip so engine-created popups land as Millie tabs too.
+   browser->tab_strip_model()->AddObserver(mori::MoriTabStripObserver());
+   // Reflect this Space's downloads into DownloadStore too (not just default's).
+   mori::EnsureDownloadObserverForProfile(profile);
+-  g_profile_browsers[key] = browser;
++  // Pre-grant auto-PiP for conferencing hosts on this isolated Space's profile
++  // (incognito Spaces in particular need ALLOW, since "ask" reads as BLOCK).
++  MoriSeedAutoPipContentSettings(profile);
++  (*g_profile_browsers)[key] = browser;
+   NSLog(@"MORI: isolated profile browser key=%s profile=%p browser=%p",
+         key.c_str(), profile, browser);
+   return browser;
+@@ -1272,12 +1719,12 @@ bool HandleExternalProtocol(const GURL& url, bool has_user_gesture) {
+   if (!g_mori_browser) {
+     return nullptr;
+   }
+-  Profile* profile = MoriProfileFromKey(g_active_profile_key);
++  Profile* profile = MoriProfileFromKey(*g_active_profile_key);
+   return profile ? profile : g_mori_browser->GetProfile();
+ }
+ 
+ void SetActiveProfileKey(const std::string& key) {
+-  g_active_profile_key = key.empty() ? "default" : key;
++  (*g_active_profile_key) = key.empty() ? "default" : key;
+ }
+ 
+ Profile* ProfileForKey(const std::string& key) {
+@@ -1291,11 +1738,11 @@ void SetActiveProfileKey(const std::string& key) {
+   if (!g_mori_browser) {
+     return nullptr;
+   }
+-  if (g_active_profile_key.empty() || g_active_profile_key == "default") {
++  if (g_active_profile_key->empty() || *g_active_profile_key == "default") {
+     return g_mori_browser;
+   }
+   return MoriBrowserForProfileKey(
+-      base::SysUTF8ToNSString(g_active_profile_key));
++      base::SysUTF8ToNSString(*g_active_profile_key));
+ }
+ 
+ }  // namespace mori
+@@ -1313,6 +1760,7 @@ @implementation MoriBrowserView {
+ }
+ 
+ @synthesize navDelegate = _navDelegate;
++@synthesize profileKey = _profileKey;
+ @synthesize currentURL = _currentURL;
+ @synthesize currentTitle = _currentTitle;
+ @synthesize isLoading = _isLoading;
+@@ -1426,13 +1874,26 @@ - (void)engineAttachWebContents:(content::WebContents*)webContents {
+   // tabs this is the primary Browser (unchanged); for isolated tabs it's their
+   // headless Browser, so window.open popups stay in the same Profile.
+   if (Browser* owner = MoriFindBrowserWithTab(webContents)) {
+-    webContents->SetDelegate(owner);
++    webContents->SetDelegate(BrowserWebContentsDelegate::From(owner));
+   } else if (g_mori_browser) {
+-    webContents->SetDelegate(g_mori_browser);
++    webContents->SetDelegate(BrowserWebContentsDelegate::From(g_mori_browser));
+   }
+   ViewMap()[webContents] = self;
+   _bridge = std::make_unique<mori::TabBridge>(webContents, self);
+ 
++  // Ensure Chrome's AutoPictureInPictureTabHelper is attached so conferencing
++  // apps (Meet/Zoom/Teams) that register the 'enterpictureinpicture' media
++  // session action auto-open a document-PiP window when this tab is switched
++  // away from. Tabs inserted into a real TabStripModel normally get this via
++  // tabs::TabModel/TabHelpers::AttachTabHelpers, but attach defensively here —
++  // this is Millie's single per-tab adoption chokepoint — and guard against a
++  // double-create. The helper triggers off TabStripModel activation changes
++  // (focusBrowser -> ActivateTabAt), which Millie drives on every tab switch.
++  if (webContents &&
++      !AutoPictureInPictureTabHelper::FromWebContents(webContents)) {
++    AutoPictureInPictureTabHelper::CreateForWebContents(webContents);
++  }
++
+   NSView* webView = webContents->GetNativeView().GetNativeNSView();
+   _webView = webView;
+   webView.frame = self.bounds;
+@@ -1463,6 +1924,19 @@ - (void)engineWebContentsGone {
+   _bridge.reset();
+   [_webView removeFromSuperview];
+   _webView = nil;
++  // During app quit / end-session, Chromium tears down every tab's WebContents
++  // engine-initiated. Routing those teardowns back into the store would empty
++  // the tab strip, make the store mint a fresh replacement new-tab, and then
++  // overwrite session.json with that degenerate state (losing pins and the real
++  // tabs) before prepareForTermination's authoritative save runs. Skip the
++  // delegate entirely while shutting down: the store keeps its live tabs so the
++  // termination save persists the true session. (browser_shutdown::
++  // IsTryingToQuit() is set by CloseAllBrowsersAndQuit before CloseAllBrowsers;
++  // HasShutdownStarted() covers the SIGTERM/end-session path.)
++  if (browser_shutdown::IsTryingToQuit() ||
++      browser_shutdown::HasShutdownStarted()) {
++    return;
++  }
+   if (engineInitiated &&
+       [_navDelegate respondsToSelector:@selector(browserViewDidCloseFromEngine:)]) {
+     // Defer to the next runloop tick: we're on Chromium's WebContents-teardown
+@@ -2185,8 +2659,84 @@ - (void)undo:(id)sender {
+ - (void)redo:(id)sender {
+   if (_webContents) _webContents->Redo();
+ }
++
++// Main-menu command targets. These are reached the same way Undo/Redo above are:
++// the menu items are set to target=nil with one of these selectors, so AppKit
++// resolves them through the responder chain to this view (the proven path — it's
++// how the Edit menu works in Millie), validates via -validateUserInterfaceItem:
++// below, and dispatches here. Each forwards to the matching MoriRoot action,
++// which operates on the store's selected tab. mori-prefixed so they can't
++// collide with any AppKit/Chromium responder selector.
++- (void)moriReload:(id)sender { [MoriRoot reload]; }
++- (void)moriForceReload:(id)sender { [MoriRoot forceReload]; }
++- (void)moriStop:(id)sender { [MoriRoot stop]; }
++- (void)moriGoHome:(id)sender { [MoriRoot goHome]; }
++- (void)moriGoBack:(id)sender { [MoriRoot goBack]; }
++- (void)moriGoForward:(id)sender { [MoriRoot goForward]; }
++- (void)moriZoomIn:(id)sender { [MoriRoot zoomIn]; }
++- (void)moriZoomOut:(id)sender { [MoriRoot zoomOut]; }
++- (void)moriResetZoom:(id)sender { [MoriRoot resetZoom]; }
++- (void)moriToggleFindBar:(id)sender { [MoriRoot toggleFindBar]; }
++- (void)moriFindNext:(id)sender { [MoriRoot findNext]; }
++- (void)moriFindPrevious:(id)sender { [MoriRoot findPrevious]; }
++- (void)moriFocusOmnibox:(id)sender { [MoriRoot focusOmnibox]; }
++- (void)moriToggleDevTools:(id)sender { [MoriRoot toggleDevTools]; }
++- (void)moriPrintPage:(id)sender { [MoriRoot printPage]; }
++- (void)moriSelectNextTab:(id)sender { [MoriRoot selectNextTab]; }
++- (void)moriSelectPreviousTab:(id)sender { [MoriRoot selectPreviousTab]; }
++- (void)moriDuplicateTab:(id)sender { [MoriRoot duplicateCurrentTab]; }
++- (void)moriTogglePinTab:(id)sender { [MoriRoot togglePinCurrentTab]; }
++- (void)moriToggleMuteTab:(id)sender { [MoriRoot toggleMuteCurrentTab]; }
++- (void)moriCloseTabsToRight:(id)sender { [MoriRoot closeTabsToRightOfCurrent]; }
++- (void)moriNewSplit:(id)sender { [MoriRoot newSplit]; }
++- (void)moriCloseTab:(id)sender { [MoriRoot closeCurrentTab]; }
++
++// Chrome's main-menu browser commands (Reload, Back/Forward, Zoom, Print, Close
++// Tab, Duplicate/Pin/Mute Tab, …) are plain target=nil `commandDispatch:` items
++// tagged with their IDC. In Chrome they dispatch through the browser window's
++// command controller — which Millie's plain NSWindow doesn't have, so AppKit
++// greyed them out. Rather than rewrite Chrome's menu items (it rebuilds them on
++// activation and CHECKs their tags), we handle `commandDispatch:` right here:
++// MoriBrowserView is already in the key window's responder chain (that's how the
++// Edit menu's undo:/redo: reach us), RWHVCocoa doesn't implement
++// commandDispatch:, and AppController (the app delegate) is further down the
++// chain. So the menu resolves these to us. We service the commands Millie owns
++// and forward everything else (New Tab, New Window, …) to AppController so its
++// app-level commands keep working exactly as before.
++- (void)commandDispatch:(id)sender {
++  if (MoriRunBrowserCommand([sender tag])) {
++    return;
++  }
++  id del = NSApp.delegate;  // forward app-level commands to AppController
++  if ([del respondsToSelector:@selector(commandDispatch:)]) {
++    [del commandDispatch:sender];
++  }
++}
++
++- (void)commandDispatchUsingKeyModifiers:(id)sender {
++  if (MoriRunBrowserCommand([sender tag])) {
++    return;
++  }
++  id del = NSApp.delegate;
++  if ([del respondsToSelector:@selector(commandDispatchUsingKeyModifiers:)]) {
++    [del commandDispatchUsingKeyModifiers:sender];
++  }
++}
++
+ - (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
+   SEL action = [item action];
++  if (action == @selector(commandDispatch:) ||
++      action == @selector(commandDispatchUsingKeyModifiers:)) {
++    if (MoriSelectorForCommand([item tag])) {
++      return YES;  // a command Millie services — always available
++    }
++    // Not ours: let AppController decide (so New Tab/New Window/… stay correct).
++    id del = NSApp.delegate;
++    if ([del respondsToSelector:@selector(validateUserInterfaceItem:)]) {
++      return [del validateUserInterfaceItem:item];
++    }
++    return NO;
++  }
+   if (action == @selector(undo:) || action == @selector(redo:)) {
+     return _webContents != nullptr;
+   }
+@@ -2528,7 +3078,7 @@ + (void)flushCookies {
+     partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
+         base::DoNothing());
+   }
+-  for (const auto& entry : g_profile_browsers) {
++  for (const auto& entry : *g_profile_browsers) {
+     if (entry.second) {
+       entry.second->GetProfile()
+           ->GetDefaultStoragePartition()
+diff --git a/chrome/browser/ui/mori/mori_import.mm b/chrome/browser/ui/mori/mori_import.mm
+index 7e1a9f3a88..f8c953d49a 100644
+--- a/chrome/browser/ui/mori/mori_import.mm
++++ b/chrome/browser/ui/mori/mori_import.mm
+@@ -1,5 +1,10 @@
+ // Millie "Import from your old browser". See mori_import.h.
+ 
++#ifdef UNSAFE_BUFFERS_BUILD
++#pragma allow_unsafe_buffers
++#pragma allow_unsafe_libc_calls
++#endif
++
+ #import "chrome/browser/ui/mori/mori_import.h"
+ 
+ #import <CommonCrypto/CommonCrypto.h>
+@@ -241,7 +246,7 @@ int ImportPasswords(const base::FilePath& profile_dir,
+         cred.signon_realm = s.ColumnString(3);
+         cred.url = GURL(origin);
+         cred.username_value = base::UTF8ToUTF16(s.ColumnString(1));
+-        cred.password_value = base::UTF8ToUTF16(password);
++        cred.password_value = password_manager::PasswordString(base::UTF8ToUTF16(password));
+         cred.date_created = TimeFromChrome(s.ColumnInt64(4));
+         cred.blocked_by_user = blocked;
+         cred.in_store = password_manager::PasswordForm::Store::kProfileStore;
+diff --git a/chrome/browser/ui/mori/mori_permission_prompt.mm b/chrome/browser/ui/mori/mori_permission_prompt.mm
+index 91a5a217bf..0c4199442b 100644
+--- a/chrome/browser/ui/mori/mori_permission_prompt.mm
++++ b/chrome/browser/ui/mori/mori_permission_prompt.mm
+@@ -93,7 +93,6 @@ TabSwitchingBehavior GetTabSwitchingBehavior() override {
+   std::optional<gfx::Rect> GetViewBoundsInScreen() const override {
+     return std::nullopt;
+   }
+-  bool ShouldFinalizeRequestAfterDecided() const override { return true; }
+   std::vector<permissions::ElementAnchoredBubbleVariant> GetPromptVariants()
+       const override {
+     return {};
+diff --git a/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc b/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
+index a48ce6f2a8..d774e0f163 100644
+--- a/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
++++ b/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
+@@ -344,12 +344,11 @@ void ReadAnythingSidePanelController::TabWillDetach(
+   // not create a SidePanelCoordinator. This block will be unnecessary once that
+   // changes.
+   if (!side_panel_ui) {
+-    // TODO(webium): create a SidePanelCoordinator for WebUIBrowser.
+-    // This is a temporary solution to avoid a crash.
+-    if (!webui_browser::IsWebUIBrowserEnabled()) {
+-      CHECK_IS_TEST();
+-    }
+-    return;  // IN-TEST
++    // No SidePanelCoordinator on this browser window. WebUIBrowser and the
++    // Mori SwiftUI window (MoriBrowserWindow) legitimately host no Views side
++    // panel, so there is nothing to close — return instead of asserting
++    // test-only (which traps in production and crashes Mori on tab close).
++    return;
+   }
+ 
+   SidePanelEntry::Key read_anything_key(SidePanelEntry::Id::kReadAnything);
+diff --git a/chrome/browser/ui/sad_tab_controller.cc b/chrome/browser/ui/sad_tab_controller.cc
+index 804a89c558..57c2b32b3a 100644
+--- a/chrome/browser/ui/sad_tab_controller.cc
++++ b/chrome/browser/ui/sad_tab_controller.cc
+@@ -29,7 +29,12 @@ ContentsWebView* FindContentsWebView(content::WebContents* web_contents) {
+     return nullptr;
+   }
+   BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
+-  DCHECK(browser_view);
++  // Mori: Millie uses a custom native window with no chrome BrowserView, so
++  // there is no Views ContentsWebView to reinstall the sad-tab overlay into.
++  // Return null (the callers handle it) instead of dereferencing null.
++  if (!browser_view) {
++    return nullptr;
++  }
+ 
+   for (auto* contents_view : browser_view->GetAllVisibleContentsWebViews()) {
+     if (contents_view->web_contents() == web_contents) {
+diff --git a/chrome/browser/ui/tabs/tab_dialog_manager.cc b/chrome/browser/ui/tabs/tab_dialog_manager.cc
+index 7d55c065d8..1b12467c70 100644
+--- a/chrome/browser/ui/tabs/tab_dialog_manager.cc
++++ b/chrome/browser/ui/tabs/tab_dialog_manager.cc
+@@ -357,10 +357,14 @@ void TabDialogManager::ShowDialog(views::Widget* widget,
+   // Only show as active if the primary window widget (usually the browser
+   // window) is painted as active. This prevents a background browser window
+   // from becoming foreground on showing the dialog.
+-  if (GetHostWidget()->ShouldPaintAsActive()) {
+-    widget_->Show();
+-  } else {
++  // Mori: Millie's custom native window has no Views host widget
++  // (GetHostWidget() is null), so fall back to a normal Show() instead of
++  // dereferencing null.
++  views::Widget* host_widget = GetHostWidget();
++  if (host_widget && !host_widget->ShouldPaintAsActive()) {
+     widget->ShowInactive();
++  } else {
++    widget_->Show();
+   }
+ 
+   UpdateDialogVisibility();
+diff --git a/chrome/browser/ui/toasts/toast_controller.cc b/chrome/browser/ui/toasts/toast_controller.cc
+index 4ea7cb8bf3..edeb7cca2a 100644
+--- a/chrome/browser/ui/toasts/toast_controller.cc
++++ b/chrome/browser/ui/toasts/toast_controller.cc
+@@ -316,11 +316,12 @@ void ToastController::CreateToast(ToastParams params,
+   // ToastController testability.
+   views::View* anchor_view = GetAnchorView(spec->is_global_scope());
+   if (!anchor_view) {
+-    // Don't actually create the toast in unit tests
+-    // TODO(webium): show toast in webui browser.
+-    if (!webui_browser::IsWebUIBrowserEnabled()) {
+-      CHECK_IS_TEST();
+-    }
++    // Millie note: Millie's browser chrome is SwiftUI, not Views, so there is
++    // never a Views toast anchor. Upstream CHECK_IS_TEST()s here (a null anchor
++    // outside tests "can't happen" in real Chrome), which hard-crashes Millie
++    // whenever Chrome itself tries to raise a toast — e.g. the non-milestone
++    // update toast on the first launch after a build bump, which crash-LOOPED
++    // 2.60 on startup. Treat "no anchor" as "no toast" and return quietly.
+     return;
+   }
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_window_factory.cc b/chrome/browser/ui/views/frame/browser_window_factory.cc
+index fff1235c35..a610b1231b 100644
+--- a/chrome/browser/ui/views/frame/browser_window_factory.cc
++++ b/chrome/browser/ui/views/frame/browser_window_factory.cc
+@@ -25,6 +25,11 @@
+ #include "chromeos/components/kiosk/kiosk_utils.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/mori/mori_browser_window.h"
++#endif
++
+ // static
+ std::unique_ptr<BrowserWindow, BrowserWindowDeleter>
+ BrowserWindow::CreateBrowserWindow(Browser* browser,
+@@ -36,6 +41,17 @@ BrowserWindow::CreateBrowserWindow(Browser* browser,
+         new WebUIBrowserWindow(browser));
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // Mori overlay: drive normal browser windows through the SwiftUI chrome
++  // (MoriBrowserWindow) instead of the Views BrowserView. Mori is single-window
++  // and its bridge only handles TYPE_NORMAL, so let popups, PWAs, and DevTools
++  // windows fall through to the standard Views BrowserView.
++  if (browser->GetType() == BrowserWindowInterface::TYPE_NORMAL) {
++    return std::unique_ptr<BrowserWindow, BrowserWindowDeleter>(
++        new MoriBrowserWindow(browser));
++  }
++#endif
++
+ #if defined(USE_AURA)
+   // Avoid generating too many occlusion tracking calculation events before this
+   // function returns. The occlusion status will be computed only once once this
+diff --git a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
+index 9524e1fc83..5fc132a317 100644
+--- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
++++ b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
+@@ -35,6 +35,8 @@
+ #include "url/origin.h"
+ 
+ #if BUILDFLAG(IS_MAC)
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/mori/mori_permission_prompt.h"
+ #include "chrome/browser/ui/views/permissions/permission_prompt_notifications_mac.h"
+ #include "chrome/browser/web_applications/os_integration/mac/web_app_shortcut_mac.h"
+ #endif
+@@ -289,6 +291,20 @@ std::unique_ptr<permissions::PermissionPrompt> CreatePermissionPrompt(
+     return nullptr;
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // Mori overlay: normal windows use the SwiftUI chrome (MoriBrowserWindow),
++  // which has no Views toolbar/location bar for the standard permission bubble
++  // to anchor to (anchoring there null-derefs). Use Mori's native sheet.
++  // M151: this factory no longer receives a Browser*; derive it from the tab.
++  BrowserWindowInterface* mori_bwi =
++      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
++  Browser* mori_browser =
++      mori_bwi ? mori_bwi->GetBrowserForMigrationOnly() : nullptr;
++  if (mori_browser && mori_browser->GetType() == BrowserWindowInterface::TYPE_NORMAL) {
++    return mori::CreateMoriPermissionPrompt(web_contents, delegate);
++  }
++#endif
++
+ #if BUILDFLAG(IS_MAC)
+   // If this is a notification permission request coming from a PWA (or a PWA
+   // associated tab), and this is the first time we show a permission prompt for
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+index 555ba9d9fd..3423c83ed4 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -990,7 +990,12 @@ void NewTabPageHandler::UpdateFooterVisibility() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  // Mori: null for browsers without a chrome BrowserView (Millie's custom
++  // native window). Tolerate instead of CHECK-crashing. See
++  // OnBrowserWindowInterfaceChanged() for the matching guard.
++  if (!footer_controller) {
++    return;
++  }
+   OnFooterVisibilityUpdated(footer_controller->GetFooterVisible(web_contents_));
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }
+@@ -1379,7 +1384,14 @@ void NewTabPageHandler::OnBrowserWindowInterfaceChanged() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  // Mori: the NTP footer controller is only created for browsers that own a
++  // chrome BrowserView (see browser_window_features.cc). Millie uses a custom
++  // native window with no BrowserView, so the controller is legitimately null
++  // here; tolerate it instead of CHECK-crashing, matching the null-browser
++  // early-return above.
++  if (!footer_controller) {
++    return;
++  }
+   footer_controller_observation_.Observe(footer_controller);
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ }
+diff --git a/chrome/browser/ui/webui/new_tab_page_third_party/new_tab_page_third_party_handler.cc b/chrome/browser/ui/webui/new_tab_page_third_party/new_tab_page_third_party_handler.cc
+index 8061f2f6ef..3b48b6029c 100644
+--- a/chrome/browser/ui/webui/new_tab_page_third_party/new_tab_page_third_party_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page_third_party/new_tab_page_third_party_handler.cc
+@@ -54,9 +54,12 @@ void NewTabPageThirdPartyHandler::OnNativeThemeUpdated(
+ void NewTabPageThirdPartyHandler::NotifyAboutTheme() {
+   auto theme = new_tab_page_third_party::mojom::Theme::New();
+   auto most_visited = most_visited::mojom::MostVisitedTheme::New();
++  // Millie hosts the NTP web_contents in MoriBrowserWindow, a non-Views window
++  // whose hosting widget exposes no ui::ThemeProvider, so this returns null.
++  // Don't DCHECK/dereference it unconditionally; the custom-background block
++  // below is guarded instead (Chrome themes are unused in Millie).
+   const ui::ThemeProvider* theme_provider =
+       webui::GetThemeProviderDeprecated(web_contents_);
+-  DCHECK(theme_provider);
+   const ui::ColorProvider& color_provider = web_contents_->GetColorProvider();
+   most_visited->background_color =
+       color_provider.GetColor(kColorNewTabPageMostVisitedTileBackground);
+@@ -67,7 +70,8 @@ void NewTabPageThirdPartyHandler::NotifyAboutTheme() {
+   theme->color_background = color_utils::SkColorToRgbaString(GetThemeColor(
+       webui::GetNativeThemeDeprecated(web_contents_),
+       web_contents_->GetColorProvider(), kColorNewTabPageBackground));
+-  if (theme_provider->HasCustomImage(IDR_THEME_NTP_BACKGROUND)) {
++  if (theme_provider &&
++      theme_provider->HasCustomImage(IDR_THEME_NTP_BACKGROUND)) {
+     theme->background_tiling = GetNewTabBackgroundTilingCSS(*theme_provider);
+     theme->background_position =
+         GetNewTabBackgroundPositionCSS(*theme_provider);
+diff --git a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
+index e4797edbc7..80a1ee327f 100644
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
+@@ -547,7 +547,11 @@ void CustomizeChromePageHandler::OnBrowserWindowInterfaceChanged() {
+   }
+ 
+   auto* footer_controller = browser->GetFeatures().new_tab_footer_controller();
+-  CHECK(footer_controller);
++  // Mori: null for browsers without a chrome BrowserView (Millie's custom
++  // native window). Tolerate instead of CHECK-crashing.
++  if (!footer_controller) {
++    return;
++  }
+   footer_controller_observation_.Observe(footer_controller);
+ }
+ 
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 3f87ec84fb..796f266fef 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -163,9 +163,11 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   bool parse_result = base::StringToInt(major_version, &major_version_number);
+   DCHECK(parse_result);
+   std::optional<std::string> brand;
+-#if !BUILDFLAG(CHROMIUM_BRANDING)
+-  brand = version_info::GetProductName();
+-#endif
++  // Millie: always identify as "Google Chrome" in the Sec-CH-UA brand list.
++  // Premium streaming services (Netflix, DirecTV) gate playback authorization
++  // on a recognized browser brand; the default "Chromium" brand is refused.
++  // The UA string already reports Chrome/<version>; this aligns client hints.
++  brand = "Google Chrome";
+ 
+   std::string brand_version =
+       output_version_type == blink::UserAgentBrandVersionType::kFullVersion
+diff --git a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
+index 34b97757c8..d9f3e02399 100644
+--- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
++++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
+@@ -847,8 +847,12 @@ - (AcceptMouseEvents)acceptsMouseEventsOption {
+     return [_responderDelegate acceptsMouseEventsOption];
+   }
+ 
+-  // By default, only active window accepts mouse events.
+-  return AcceptMouseEvents::kWhenInActiveWindow;
++  // Mori: Millie's browser window is SwiftUI-hosted and has no BridgedContentView
++  // (which in stock Chrome returns acceptsFirstMouse:YES), so with the default
++  // kWhenInActiveWindow the FIRST click on a link in an inactive window is
++  // swallowed as an activation click and the user has to click twice. Accept
++  // clicks always (click-through), matching Chrome's effective behavior.
++  return AcceptMouseEvents::kAlways;
+ }
+ 
+ - (BOOL)acceptsFirstMouse:(NSEvent*)theEvent {
+diff --git a/tools/rust/build_bindgen.py b/tools/rust/build_bindgen.py
+index 6238d3dd36..67b0876fef 100755
+--- a/tools/rust/build_bindgen.py
++++ b/tools/rust/build_bindgen.py
+@@ -239,7 +239,11 @@ def main():
+         ]
+         + cargo_shared_args
+     )
+-    static_feature = ",static" if ('windows' not in RustTargetTriple()) else ""
++    # Mori/Millie: match the proven 152 build — use DYNAMIC libclang (runtime
++    # dlopen of libclang.dylib), not the `static` clang-sys feature. 153 switched
++    # to static, which requires libclang.a; the from-source llvm-host build here
++    # doesn't emit libclang.a, so static fails ("could not find libclang.a").
++    static_feature = ""
+     cargo_args = [
+         'build',
+         f'--target={RustTargetTriple()}',
+diff --git a/tools/rust/build_rust.py b/tools/rust/build_rust.py
+index 1558bb2985..0203640b65 100755
+--- a/tools/rust/build_rust.py
++++ b/tools/rust/build_rust.py
+@@ -299,14 +299,23 @@ def FetchBetaPackage(name, rust_git_hash, triple=None):
+ 
+     # Pull the stage0 to find the package intended to be used to build this
+     # version of the Rust compiler.
+-    STAGE0_JSON_URL = (
+-        'https://chromium.googlesource.com/external/github.com/'
+-        'rust-lang/rust/+/{GIT_HASH}/src/stage0?format=TEXT'
+-    )
+-    base64_text = FetchUrl(
+-        STAGE0_JSON_URL.format(GIT_HASH=rust_git_hash)
+-    ).decode("utf-8")
+-    stage0 = base64.b64decode(base64_text).decode("utf-8")
++    # Millie POC: prefer the stage0 file from the already-checked-out rust-src
++    # clone (CheckoutGitRepo runs just before this via the git protocol, which
++    # works even when the gitiles ?format=TEXT file API is throttled/503ing).
++    # Fall back to the network fetch only if the local file is missing.
++    local_stage0 = os.path.join(RUST_SRC_DIR, 'src', 'stage0')
++    if os.path.exists(local_stage0):
++        with open(local_stage0, 'r') as f:
++            stage0 = f.read()
++    else:
++        STAGE0_JSON_URL = (
++            'https://chromium.googlesource.com/external/github.com/'
++            'rust-lang/rust/+/{GIT_HASH}/src/stage0?format=TEXT'
++        )
++        base64_text = FetchUrl(
++            STAGE0_JSON_URL.format(GIT_HASH=rust_git_hash)
++        ).decode("utf-8")
++        stage0 = base64.b64decode(base64_text).decode("utf-8")
+     lines = stage0.splitlines()
+ 
+     # The stage0 file contains the path to all tarballs it uses binaries from.

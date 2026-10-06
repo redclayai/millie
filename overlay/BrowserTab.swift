@@ -71,6 +71,11 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     /// Fired when a navigation is stopped because the destination is on the
     /// phishing/malware blocklist, so the store can raise the interstitial.
     var onThreatBlocked: ((BrowserTab, String) -> Void)?
+    /// Fired when the ENGINE tears down this tab's WebContents (page called
+    /// `window.close()`, or the renderer crashed) — as opposed to Millie closing
+    /// it. The store wires this to dismiss a peek / close a normal tab so the UI
+    /// doesn't linger over a dead web view.
+    var onEngineClose: (() -> Void)?
     /// Hosts the user chose to visit despite a Safe Browsing block (per tab).
     var bypassedThreatHosts: Set<String> = []
 
@@ -524,6 +529,14 @@ extension BrowserTab: MoriBrowserViewDelegate {
 
     func browserView(_ view: MoriBrowserView, didChangeAudioState audible: Bool) {
         self.isAudible = audible
+    }
+
+    /// The engine tore down this tab's WebContents on its own — the page called
+    /// `window.close()` (e.g. an OAuth "you can close this tab" popup) or the
+    /// renderer crashed. Millie must drop its reference: a peek dismisses, a
+    /// normal tab closes. (Not called for Millie-initiated closes.)
+    func browserViewDidClose(fromEngine view: MoriBrowserView) {
+        onEngineClose?()
     }
 
     func browserView(_ view: MoriBrowserView,

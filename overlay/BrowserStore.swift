@@ -2,6 +2,20 @@ import SwiftUI
 import AppKit
 import Combine
 
+/// A one-shot Ask-Millie request staged by the launcher's "Add tabs or files"
+/// flow and consumed by `AIPanel`. `id` makes each request distinct so the
+/// panel's `onChange` fires even for an identical question/context pair.
+struct AILauncherRequest: Equatable {
+    let id = UUID()
+    var question: String
+    var title: String
+    var context: String
+
+    static func == (lhs: AILauncherRequest, rhs: AILauncherRequest) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
 /// Top-level browser state: the open tabs, selection, and chrome toggles.
 final class BrowserStore: ObservableObject {
     @Published var tabs: [BrowserTab] = []
@@ -18,23 +32,31 @@ final class BrowserStore: ObservableObject {
     /// router can force the SwiftUI text field to resign — otherwise it re-grabs
     /// first responder a beat after a main-web click and swallows ⌘C/⌘V.
     @Published var aiInputFocused = false
+    /// A one-shot Ask-Millie request staged by the launcher's "Add tabs or files"
+    /// flow. `AIPanel` consumes it on appear/change: with a question it sends the
+    /// question carrying the attachment `context`; with an empty question it
+    /// stages the context and focuses the composer so the user can type. Cleared
+    /// by the panel once consumed.
+    @Published var aiLauncherRequest: AILauncherRequest?
     /// The web panel currently shown in the right-edge dock (nil = dock closed).
     @Published var activePanelID: WebPanel.ID? {
         didSet {
-            // Opening a panel marks it as the focused surface. Crucially this
-            // makes shouldAutoFocusWebContent false, which disables ALL auto-
-            // refocus while a panel is open — so nothing steals the caret. Focus
-            // then follows clicks (routePanelClick): clicking the main tab flips
-            // this false and focuses main; clicking the panel flips it true.
-            // (Setting this false on open re-enabled auto-refocus and let the
-            // panel keep grabbing the caret — the typing regression.)
+            // The panel lives in its own child NSWindow (PanelChildWindow) with
+            // its own first responder, so it never competes with the main tab
+            // for the window's keyboard — no auto-focus gate is needed here.
+            // Focus then follows clicks (routePanelClick): clicking into the
+            // panel keys its child window; clicking the main web hands keyboard
+            // back to the main tab. Opening a panel records it as the last-
+            // touched surface (see panelHasFocus), and installs the click/key
+            // routers that make copy/paste deterministic while a panel is open.
             panelHasFocus = activePanelID != nil
             updatePanelClickMonitor()
         }
     }
-    /// Whether keyboard focus currently belongs to the open panel (vs the main
-    /// tab). Click-driven; gates the main-tab auto-focus so typing goes to
-    /// whichever side you last clicked.
+    /// Records which web surface (panel vs main tab) the user last clicked while
+    /// a panel is open. Written by routePanelClick; kept as diagnostic/state,
+    /// not a hard gate (the child window's own first responder is what actually
+    /// routes the keyboard).
     @Published var panelHasFocus = false
     private var panelClickMonitor: Any?
     /// Key monitor that deterministically routes ⌘C/⌘X/⌘V/⌘A to the intended
@@ -45,6 +67,10 @@ final class BrowserStore: ObservableObject {
     /// they never appear in the sidebar or the maintenance passes.
     private var panelTabs: [WebPanel.ID: BrowserTab] = [:]
     @Published var settingsVisible: Bool = false
+    /// True while a page's <video> is in exclusive-access (element) fullscreen.
+    /// The web card drops its rounded-corner mask + border when set so macOS can
+    /// promote the video to a hardware overlay plane (smooth 4K fullscreen).
+    @Published var isFullscreen: Bool = false
     /// First-run welcome tour (also reopenable from Settings).
     @Published var welcomeVisible: Bool = false
     @Published var findBarVisible: Bool = false
@@ -170,6 +196,10 @@ final class BrowserStore: ObservableObject {
     private let sessionFileURL: URL
     private var sessionSaveScheduled = false
     private var isRestoringSession = false
+    /// Set once the app is quitting. Suppresses debounced session saves so
+    /// shutdown-induced tab churn can't overwrite the authoritative save that
+    /// prepareForTermination() writes while the real tabs are still intact.
+    private var isTerminating = false
 
     /// Repeating timer that drives auto-sleep and auto-archive (see
     /// TabMaintenance.swift). Retained here for the lifetime of the store.
@@ -282,9 +312,26 @@ final class BrowserStore: ObservableObject {
             }
         // Let the media controller map an engine broadcast back to its tab.
         media.resolveTab = { [weak self] browserId in
-            self?.tabs.first {
+            guard let self else { return nil }
+            if let t = self.tabs.first(where: {
+                $0.hasRealized && Int($0.browserView.browserIdentifier) == browserId
+            }) { return t }
+            // Web panels (docked side-panel apps like a music player) live outside
+            // the tab strip but still feed — and are controlled from — the sidebar
+            // now-playing player, so resolve them here too.
+            return self.panelTabs.values.first {
                 $0.hasRealized && Int($0.browserView.browserIdentifier) == browserId
             }
+        }
+        // Video (exclusive-access) fullscreen toggles this so the web card drops
+        // its rounded-corner mask + border — a layer mask/overlay prevents macOS
+        // from promoting a fullscreen <video> to a hardware overlay plane, which
+        // makes 4K playback drop frames (see mori_browser_window.mm).
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("MoriVideoFullscreenChanged"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            self?.isFullscreen = (note.userInfo?["active"] as? Bool) ?? false
         }
         installExtensionCommandSmokeIfNeeded()
         startTabMaintenance()
@@ -426,6 +473,7 @@ final class BrowserStore: ObservableObject {
             // v1 session: fold the flat pinned/folder state into one context.
             let name = decoded.spaceName.flatMap { $0.isEmpty ? nil : $0 } ?? "Personal"
             let context = BrowserContext(
+                id: BrowserContext.defaultContextID,
                 name: name,
                 symbol: "glyph-circle",
                 theme: settings.gradientTheme,
@@ -461,6 +509,7 @@ final class BrowserStore: ObservableObject {
     private func ensureContextIntegrity() {
         if contexts.isEmpty {
             let context = BrowserContext(
+                id: BrowserContext.defaultContextID,
                 name: "Personal",
                 symbol: "glyph-circle",
                 theme: settings.gradientTheme,
@@ -482,7 +531,7 @@ final class BrowserStore: ObservableObject {
     }
 
     func scheduleSessionSave() {
-        guard !isRestoringSession, !sessionSaveScheduled else { return }
+        guard !isRestoringSession, !isTerminating, !sessionSaveScheduled else { return }
         sessionSaveScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -575,6 +624,14 @@ final class BrowserStore: ObservableObject {
         }
         tab.onThreatBlocked = { [weak self] tab, url in
             self?.presentThreatBlock(tab: tab, url: url)
+        }
+        // The page closed itself (window.close()) or its renderer crashed. The
+        // engine already dropped the WebContents; remove Millie's tab too so the
+        // sidebar doesn't keep a dead entry. allowPinned so a self-closing
+        // pinned tab (rare, but e.g. an auth page pinned by the user) still goes.
+        tab.onEngineClose = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.closeTab(tab.id, allowPinned: true, allowFolderRemoval: true, forceRemove: true)
         }
     }
 
@@ -688,12 +745,23 @@ final class BrowserStore: ObservableObject {
         let target = MoriURLRewriter.rewrite(
             URLInterpreter.resolve(panel.url, settings: settings))
         let tab = BrowserTab(url: target, title: panel.title.isEmpty ? "Panel" : panel.title)
-        // Links opened from a panel go to a real tab (not nested in the dock).
+        // Ordinary in-panel link clicks navigate the panel in place (they stay in
+        // the dock). Only an explicit new-window gesture (window.open /
+        // target=_blank) opens elsewhere: that WebContents is inserted into the
+        // tab strip and surfaces through the engine orphan-adoption path
+        // (MoriTabStripBridge → MoriRoot.openNewTab), which opens ONE real main
+        // tab. openNewTab detects the panel origin (its child window is key) and
+        // opens a plain tab rather than mis-peeking it off the selected main tab.
         tab.onRequestNewTab = { [weak self] u in self?.newTab(url: u) }
         tab.faviconURL = panel.faviconURL
         panelTabs[id] = tab
         return tab
     }
+
+    /// Realized web-panel web views, exposed so media polling (a cross-file
+    /// extension) can sample them alongside tab-strip tabs. Panels never sleep,
+    /// so this is exactly the set whose media should feed the now-playing player.
+    var realizedPanelTabs: [BrowserTab] { panelTabs.values.filter { $0.hasRealized } }
 
     /// Pin the current page as a new web panel and open it.
     func addWebPanelForCurrentPage() {
@@ -726,6 +794,10 @@ final class BrowserStore: ObservableObject {
     }
 
     func removeWebPanel(_ id: WebPanel.ID) {
+        // Drop the panel's media so the now-playing player doesn't linger on it.
+        if let tab = panelTabs[id], tab.hasRealized {
+            media.forgetTab(browserId: Int(tab.browserView.browserIdentifier))
+        }
         settings.webPanels.removeAll { $0.id == id }
         panelTabs[id]?.close()
         panelTabs[id] = nil
@@ -776,15 +848,16 @@ final class BrowserStore: ObservableObject {
         let fr = NSApp.keyWindow?.firstResponder
         if fr is NSText || (fr as? NSView)?.isKind(of: NSTextView.self) == true { return event }
 
-        // Pick the target web view: the web panel if it currently holds the
-        // window's first responder (both panel and main tab are now sibling web
-        // views in the ONE window), otherwise the main tab. Each performs the
-        // command on its own focused frame, so this routes correctly.
+        // Pick the target web view: the web panel if its child window is key,
+        // otherwise the main tab. The panel lives in its own child NSWindow, so
+        // "which window is key" is an authoritative, non-guessed signal (unlike
+        // the sibling-view era, which had to guess at first responder). Both
+        // perform the command on their own focused frame regardless of OS focus,
+        // so this always works.
         let panelView = activePanelID.flatMap { panelTabs[$0]?.browserView }
-        let firstResponder = NSApp.keyWindow?.firstResponder as? NSView
-        let panelFocused = panelView != nil && firstResponder != nil
-            && firstResponder!.isDescendant(of: panelView!)
-        let target: MoriBrowserView? = panelFocused ? panelView : selectedTab?.browserView
+        let target: MoriBrowserView? =
+            (panelView != nil && NSApp.keyWindow === panelView?.window) ? panelView
+                                                                        : selectedTab?.browserView
         guard let web = target else { return event }
         switch key {
         case "c": web.copySelection()
@@ -797,36 +870,42 @@ final class BrowserStore: ObservableObject {
     }
 
     private func routePanelClick(_ event: NSEvent) {
-        // The web panel and AI panel now live IN the main window (the panel web
-        // view is a sibling of the main tab's, like a split pane), so all clicks
-        // are in one window — no child-window key gymnastics. We just hand Blink
-        // content-focus to whichever web view was clicked, because opening either
-        // panel steals content-focus from the main tab (⌘C/⌘V would then no-op).
-        let window = selectedTab?.browserView.window
-        guard event.window === window else { return }
-        let hit = window?.contentView?.hitTest(event.locationInWindow)
-        func clicked(_ view: MoriBrowserView?) -> Bool {
-            guard let view else { return false }
-            return hit === view || hit?.isDescendant(of: view) == true
-        }
-
-        // 1) Clicked into the web panel → focus its content so typing/⌘V land
-        //    there, and resign the AI composer's SwiftUI @FocusState.
-        if let id = activePanelID, clicked(panelTabs[id]?.browserView) {
-            if aiInputFocused { aiInputFocused = false }
-            if !panelHasFocus { panelHasFocus = true }
-            panelTabs[id]?.browserView.focusBrowser()
-            return
-        }
-
-        // 2) Clicked the MAIN web content → hand focus back to the main tab so
-        //    ⌘C/⌘V work (opening a panel stole its Blink content-focus). Also
-        //    resign the AI composer, which otherwise re-grabs first responder a
-        //    beat later and swallows the shortcut. Re-assert across a few
-        //    run-loop turns (each call is a no-op once the widget holds focus).
-        if clicked(selectedTab?.browserView) {
-            if aiInputFocused { aiInputFocused = false }
+        // 1) If a web panel (child window) is open and the click landed inside
+        //    it, let the panel keep the keyboard and stop here.
+        if let id = activePanelID, let panelView = panelTabs[id]?.browserView,
+           let panelWindow = panelView.window as? PanelChildWindow {
+            let clickedInPanel = event.window === panelWindow
+                && panelView.convert(panelView.bounds, to: nil).contains(event.locationInWindow)
+            if clickedInPanel {
+                panelWindow.mayBecomeKey = true
+                panelWindow.makeKeyAndOrderFront(nil)
+                if !panelHasFocus { panelHasFocus = true }
+                panelView.focusBrowser()
+                return
+            }
+            // Click landed outside the web panel → drop its key claim.
+            panelWindow.mayBecomeKey = false
             panelHasFocus = false
+        }
+
+        // 2) Otherwise, if the click hit the MAIN web content, hand keyboard
+        //    focus back to the main tab so ⌘C/⌘V work. Opening EITHER panel
+        //    steals Blink content-focus from the main tab (a main-tab shortcut
+        //    then silently no-ops; right-click Copy still works since it targets
+        //    the element directly). Crucially, also resign the AI composer's
+        //    SwiftUI @FocusState — otherwise it re-grabs first responder a beat
+        //    after the click and swallows the shortcut again. Hit-test so the
+        //    toolbar / omnibox / sidebar keep their own focus; re-assert across a
+        //    few run-loop turns (each call is a no-op once the widget holds it).
+        let mainWindow = selectedTab?.browserView.window
+        guard event.window === mainWindow else { return }
+        let hit = mainWindow?.contentView?.hitTest(event.locationInWindow)
+        let clickedMainWeb: Bool = {
+            guard let web = selectedTab?.browserView else { return false }
+            return hit === web || (hit?.isDescendant(of: web) ?? false)
+        }()
+        if clickedMainWeb {
+            if aiInputFocused { aiInputFocused = false }
             let reassert: () -> Void = { [weak self] in
                 self?.selectedTab?.browserView.takeKeyboardFocusPreservingPage()
             }
@@ -1122,6 +1201,81 @@ final class BrowserStore: ObservableObject {
         return duplicate
     }
 
+    /// Spaces a tab can be moved into: every Space except the one it lives in.
+    func moveDestinations(for id: BrowserTab.ID) -> [BrowserContext] {
+        guard let owner = contexts.first(where: { $0.tabIDs.contains(id) }) else {
+            return contexts.filter { !$0.isPrivate }
+        }
+        // A tab can't cross the incognito boundary (OTR storage never mixes with
+        // a persistent Profile), so only offer same-privacy destinations.
+        return contexts.filter { $0.id != owner.id && $0.isPrivate == owner.isPrivate }
+    }
+
+    /// Move a tab into another Space. When both Spaces share a Profile the live
+    /// tab (and its page state) moves as-is; when the destination is on a
+    /// different Profile the tab is recreated at its URL under that Profile,
+    /// because a live WebContents can't change Chromium profiles (isolation).
+    func moveTab(_ id: BrowserTab.ID, toContextID target: BrowserContext.ID) {
+        guard let srcIdx = contexts.firstIndex(where: { $0.tabIDs.contains(id) }),
+              let dstIdx = contexts.firstIndex(where: { $0.id == target }),
+              contexts[srcIdx].id != target,
+              let tab = tabs.first(where: { $0.id == id }) else { return }
+
+        let sameJar = engineKey(for: contexts[srcIdx]) == engineKey(for: contexts[dstIdx])
+        let wasActiveSelected = selectedTabID == id
+
+        // Detach from the source Space everywhere (loose list, pinned grid,
+        // folders, root order, remembered selection).
+        contexts[srcIdx].tabIDs.removeAll { $0 == id }
+        contexts[srcIdx].pinnedTabIDs.removeAll { $0 == id }
+        for fi in contexts[srcIdx].folders.indices {
+            contexts[srcIdx].folders[fi].tabIDs.removeAll { $0 == id }
+        }
+        contexts[srcIdx].folders.removeAll { $0.isTidy && $0.tabIDs.isEmpty }
+        contexts[srcIdx].rootOrder.removeAll { $0 == .tab(id) }
+        if contexts[srcIdx].selectedTabID == id { contexts[srcIdx].selectedTabID = nil }
+
+        let landingID: BrowserTab.ID
+        if sameJar {
+            // Keep the live tab; attach it to the destination as a loose root tab.
+            contexts[dstIdx].tabIDs.append(id)
+            contexts[dstIdx].rootOrder.append(.tab(id))
+            landingID = id
+        } else {
+            // Recreate under the destination Profile at the same URL.
+            let url = tab.urlString
+            let fresh = makeTab(url: url.isEmpty ? settings.newTabURL : url,
+                                title: tab.title.isEmpty ? "New Tab" : tab.title,
+                                profileKey: engineKey(for: contexts[dstIdx]))
+            fresh.faviconURL = tab.faviconURL
+            tabs.append(fresh)
+            contexts[dstIdx].tabIDs.append(fresh.id)
+            contexts[dstIdx].rootOrder.append(.tab(fresh.id))
+            if let realIdx = tabs.firstIndex(where: { $0.id == id }) {
+                tab.close()
+                tabs.remove(at: realIdx)
+            }
+            landingID = fresh.id
+        }
+        // Land on the moved tab when its new Space is next opened.
+        contexts[dstIdx].selectedTabID = landingID
+
+        // The source Space is still the one on screen. If the moved tab was the
+        // visible one, pick a neighbour there (or a fresh tab if it emptied).
+        if wasActiveSelected {
+            let remaining = orderedTabsForShortcuts
+            if let neighbour = remaining.last {
+                selectTab(neighbour.id)
+            } else {
+                _ = newTab(select: true)
+            }
+        }
+        ToastCenter.shared.show("Moved to \(contexts[dstIdx].name)",
+                                icon: "arrow.right", style: .info)
+        scheduleSessionSave()
+        objectWillChange.send()
+    }
+
     func copyURL(of id: BrowserTab.ID) {
         guard let url = tabs.first(where: { $0.id == id })?.urlString,
               !url.isEmpty
@@ -1391,6 +1545,16 @@ final class BrowserStore: ObservableObject {
         withAnimation(Motion.reveal) { aiPanelVisible = true }
     }
 
+    /// Open the assistant carrying launcher-selected tab/file context. With a
+    /// non-empty `question` the panel sends it immediately with the attachment
+    /// `context`; with an empty question the panel stages the context and focuses
+    /// the composer. If AI is off, the usual disabled-integration path handles it.
+    func askMillieWithContext(question: String, title: String, context: String) {
+        guard prepareAIPanelOpen() else { return }
+        aiLauncherRequest = AILauncherRequest(question: question, title: title, context: context)
+        withAnimation(Motion.reveal) { aiPanelVisible = true }
+    }
+
     func toggleAIPanel() {
         guard prepareAIPanelOpen() else { return }
         withAnimation(Motion.reveal) { aiPanelVisible.toggle() }
@@ -1420,6 +1584,11 @@ final class BrowserStore: ObservableObject {
     }
 
     func prepareForTermination() {
+        // Block any further debounced saves: from here on only this
+        // authoritative save should touch session.json, so late shutdown churn
+        // (a self-closing tab, an emptied strip minting a replacement) can't
+        // clobber the real session.
+        isTerminating = true
         // Make sure the cookie jar is written before we tear CEF down, so
         // sessions reliably survive the quit.
         saveSession()
@@ -2131,6 +2300,16 @@ final class BrowserStore: ObservableObject {
             && !profiles.contains(where: { $0.id == p.id }) {
             profiles.append(p)
         }
+
+        // A PINNED tab is an intentional keep: never let a remote tombstone
+        // delete it. Closing a tab's twin on another device (e.g. the iPhone)
+        // would otherwise unpin AND destroy it here — the "my pins vanished
+        // after update" bug. Protect anything pinned on EITHER side; the next
+        // push re-asserts it (deleted=false) so the pin propagates back.
+        let pinnedProtected = Set(contexts.filter { !$0.isPrivate }
+                                    .flatMap { $0.pinnedTabIDs })
+            .union(remoteSpaces.flatMap { $0.pinnedTabIDs })
+        let deletedTabIDs = deletedTabIDs.subtracting(pinnedProtected)
 
         // Ensure a sleeping tab exists for every remote record (skip tombstoned).
         let existing = Set(tabs.map(\.id))

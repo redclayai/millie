@@ -252,7 +252,14 @@ final class MoriRoot: NSObject {
         // navigation renders inside.
         let resolved = URLInterpreter.resolve(target, settings: store.settings)
         let peekable = resolved == "about:blank" || BrowserURLPolicy.isWebURL(resolved)
-        if store.settings.peekPinnedLinks,
+        // A new-window request from a WEB PANEL surfaces here too (its popup
+        // WebContents is orphan-adopted like any other). The panel keeps its own
+        // key child window (PanelChildWindow), so if it's key the gesture came
+        // from the panel — open a plain main tab, NOT a Peek attributed to the
+        // (unrelated) selected main tab, which is the "panel links spawn
+        // unexpected tabs" bug.
+        let fromPanel = NSApp.keyWindow is PanelChildWindow
+        if store.settings.peekPinnedLinks, !fromPanel,
            let source = store.selectedTab, store.isPinned(source.id), peekable {
             store.peek(url: target)
             return
@@ -314,5 +321,32 @@ final class MoriRoot: NSObject {
     @objc static func printPage() { shared?.store.printPage() }
     @objc static func selectNextTab() { shared?.store.selectNextTab() }
     @objc static func selectPreviousTab() { shared?.store.selectPreviousTab() }
+
+    // Menu-bar Tab/View actions that operate on the current tab. Thin wrappers
+    // over the same BrowserStore calls the keyboard shortcuts use (see
+    // ShortcutRegistry.swift), so the AppKit menu bar and ⌘-shortcuts stay in
+    // lockstep. All guard on an existing store/tab and no-op otherwise.
+    @objc static func duplicateCurrentTab() {
+        guard let store = shared?.store, let id = store.selectedTabID else { return }
+        _ = store.duplicateTab(id)
+    }
+    @objc static func togglePinCurrentTab() {
+        guard let store = shared?.store, let id = store.selectedTabID else { return }
+        store.togglePin(id)
+    }
+    @objc static func toggleMuteCurrentTab() { shared?.store.selectedTab?.toggleMute() }
+    @objc static func closeTabsToRightOfCurrent() {
+        guard let store = shared?.store, let id = store.selectedTabID else { return }
+        store.closeTabsToRight(of: id)
+    }
+    @objc static func newSplit() { shared?.store.newSplit() }
+
+    /// Keep every main-menu item that we retarget at [MoriRoot class] (see
+    /// InstallMillieMenuActions in mori_chrome_bridge.mm) enabled. With the menu
+    /// bar's autoenablesItems = YES, AppKit re-validates each item when its menu
+    /// opens; without this it would grey our retargeted items back out. All the
+    /// actions no-op safely when there is no active tab, so always-enabled is
+    /// correct for Millie.
+    @objc static func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { true }
 
 }

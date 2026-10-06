@@ -1006,6 +1006,15 @@ struct TabMenu: View {
             let folder = store.addFolderForEditing()
             store.addTab(tab.id, toFolder: folder.id)
         }
+        if !store.moveDestinations(for: tab.id).isEmpty {
+            Menu("Move to Space") {
+                ForEach(store.moveDestinations(for: tab.id)) { space in
+                    Button(space.name.isEmpty ? "Space" : space.name) {
+                        store.moveTab(tab.id, toContextID: space.id)
+                    }
+                }
+            }
+        }
         if store.folders.contains(where: { $0.tabIDs.contains(tab.id) }) {
             Button("Remove from Folder") { store.removeTabFromFolders(tab.id) }
         }
@@ -1444,38 +1453,196 @@ struct WebPanelDock: View {
     }
 }
 
-/// Hosts a web panel's live CEF view IN the main window as a sibling web view
-/// (like a split pane) — NOT a child window. Sharing the window's single first
-/// responder and paint pipeline makes the panel behave consistently with tabs
-/// and split, and removes the whole child-window bug class (blank-on-maximize,
-/// copy/paste focus fights, paint nudges). The page keeps running like a
-/// background tab; the view is only visually hidden while a full-window overlay
-/// (Peek, settings, launcher) is up, so the AppKit web view can't punch through
-/// it. Focus/keyboard routing lives in BrowserStore (routePanelClick / routePanelKey).
+/// A borderless child window that hosts a web panel's live web view. It becomes
+/// the key window ONLY when the user actually clicks the panel: BrowserStore's
+/// click router (`routePanelClick`) flips `mayBecomeKey` and makes it key on a
+/// panel click, and clears it — handing key back to the main window — on any
+/// click outside the panel. Gating key status on a real click is what stops a
+/// *playing* panel (YouTube etc.) from programmatically grabbing the key window
+/// and stealing ⌘V/typing from the main tab, while still letting you click into
+/// the panel and type there. Clicks, scrolling and media controls work
+/// regardless — mouse events don't require key status.
+///
+/// This is the deliberate return (2.63) from the 2.56 in-window sibling-view
+/// experiment: hosting the panel as a sibling web view in the ONE main window
+/// forced ⌘C/⌘X/⌘V/⌘A to be routed by *guessing* which of two sibling CEF views
+/// held first responder (CEF manages its own focus, so the guess was wrong often
+/// enough that copy/paste was unreliable). A separate child window gives the
+/// panel its own first responder, so routing is deterministic again.
+final class PanelChildWindow: NSWindow {
+    /// Set true by the click router only while focus is meant to be in the
+    /// panel; false otherwise, so nothing but a user click can key it.
+    var mayBecomeKey = false
+    override var canBecomeKey: Bool { mayBecomeKey }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Owns the panel's child window: hosts the web view, mirrors the placeholder's
+/// on-screen frame, and hides while a full-window overlay (launcher, Peek,
+/// settings…) is up so the floating child can't cover it.
+final class PanelWindowController {
+    let window = PanelChildWindow(contentRect: .zero,
+                                  styleMask: [.borderless],
+                                  backing: .buffered, defer: true)
+    private weak var placeholder: NSView?
+    private weak var hosted: NSView?
+    private var observers: [Any] = []
+
+    init(cornerRadius: CGFloat = 0) {
+        window.isOpaque = cornerRadius == 0
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.isReleasedWhenClosed = false
+        let content = NSView()
+        content.wantsLayer = true
+        content.layer?.cornerCurve = .continuous
+        content.layer?.cornerRadius = cornerRadius
+        content.layer?.masksToBounds = cornerRadius > 0
+        window.contentView = content
+    }
+
+    func attach(view: NSView, over placeholder: NSView, visible: Bool) {
+        self.placeholder = placeholder
+        if hosted !== view {
+            hosted?.removeFromSuperview()
+            view.frame = window.contentView?.bounds ?? .zero
+            view.autoresizingMask = [.width, .height]
+            window.contentView?.addSubview(view)
+            hosted = view
+        }
+        guard let parent = placeholder.window else { return }
+        if window.parent !== parent {
+            window.parent?.removeChildWindow(window)
+            parent.addChildWindow(window, ordered: .above)
+        }
+        installObservers(on: placeholder, parent: parent)
+        reposition()
+        setVisible(visible)
+    }
+
+    /// True once we've forced the panel's first frame. First paint needs the
+    /// child window to be keyed once (see scheduleFirstPaint); later re-shows
+    /// (an overlay closing) only need a no-key repaint kick.
+    private var didFirstPaint = false
+
+    func setVisible(_ visible: Bool) {
+        if visible {
+            if !window.isVisible { window.orderFront(nil) }
+            reposition()
+            if !didFirstPaint {
+                scheduleFirstPaint()
+            } else {
+                // Re-shown after a full-window overlay (Peek/settings/launcher)
+                // closed. The surface already exists, so a no-key repaint kick is
+                // enough — don't steal focus back to the panel here.
+                (hosted as? MoriBrowserView)?.kickCompositor()
+            }
+        } else if window.isVisible {
+            window.orderOut(nil)
+        }
+    }
+
+    /// Force the panel's first frame. A borderless child window that can't become
+    /// key reports itself occluded, so Chromium never composites it — the panel
+    /// stays BLACK until the user clicks in (which keys it). So on open we key +
+    /// focus it once to paint it: the user just opened the panel, so focusing it
+    /// is the right behaviour, and it matches the store's panelHasFocus == true on
+    /// open. From then on routePanelClick manages key (clicking the main web hands
+    /// keyboard back and re-gates the child window, so a *playing* panel can't keep
+    /// stealing the caret). Retried until the WebContents realizes.
+    private func scheduleFirstPaint(_ attempt: Int = 0) {
+        guard !didFirstPaint, attempt < 8 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0.05 : 0.15)) { [weak self] in
+            guard let self, !self.didFirstPaint else { return }
+            guard let view = self.hosted as? MoriBrowserView, view.canReceiveBrowserFocus() else {
+                self.scheduleFirstPaint(attempt + 1)
+                return
+            }
+            self.window.mayBecomeKey = true
+            self.window.makeKeyAndOrderFront(nil)
+            view.focusBrowser()
+            self.didFirstPaint = true
+        }
+    }
+
+    private func reposition() {
+        guard let placeholder, let parent = placeholder.window,
+              placeholder.superview != nil else { return }
+        let inWindow = placeholder.convert(placeholder.bounds, to: nil)
+        window.setFrame(parent.convertToScreen(inWindow), display: true)
+        scheduleRepaintKick()
+    }
+
+    /// After a window resize / maximize, the CEF compositor sometimes fails to
+    /// produce a frame at the panel's new size and it renders blank/gray — the
+    /// child-window "blank on maximize" class the sibling-view experiment was
+    /// meant to avoid. Force the hosted web view to repaint once the size
+    /// settles. Debounced so a live drag-resize kicks only after it stops. This
+    /// mirrors WebContainerView.ContainerView.scheduleRepaintKick for main tabs.
+    private var repaintKick: DispatchWorkItem?
+    private func scheduleRepaintKick() {
+        repaintKick?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            (self?.hosted as? MoriBrowserView)?.kickCompositor()
+        }
+        repaintKick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+    }
+
+    private func installObservers(on placeholder: NSView, parent: NSWindow) {
+        guard observers.isEmpty else { return }
+        placeholder.postsFrameChangedNotifications = true
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(
+            forName: NSView.frameDidChangeNotification, object: placeholder,
+            queue: .main) { [weak self] _ in self?.reposition() })
+        for name in [NSWindow.didResizeNotification, NSWindow.didMoveNotification] {
+            observers.append(nc.addObserver(forName: name, object: parent,
+                                            queue: .main) { [weak self] _ in self?.reposition() })
+        }
+    }
+
+    func teardown() {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+        hosted?.removeFromSuperview()
+        hosted = nil
+        window.parent?.removeChildWindow(window)
+        window.orderOut(nil)
+    }
+}
+
+/// Hosts a web panel's live CEF view inside the dock, in its own child window
+/// (see PanelChildWindow). `makeNSView` returns a lightweight placeholder that
+/// only marks where the panel should sit; the real web view lives in the child
+/// window, which mirrors the placeholder's on-screen frame. This keeps the panel
+/// off the main window's first responder so it can't grab the main tab's
+/// keyboard (the caret-steal a *playing* panel causes) and makes copy/paste
+/// routing deterministic (see BrowserStore.routePanelKey / routePanelClick).
 private struct WebPanelHost: NSViewRepresentable {
     @ObservedObject var tab: BrowserTab
     @ObservedObject var store: BrowserStore
 
-    func makeNSView(context: Context) -> NSView {
-        let container = NSView()
-        container.wantsLayer = true
-        return container
-    }
+    func makeCoordinator() -> PanelWindowController { PanelWindowController() }
+
+    func makeNSView(context: Context) -> NSView { NSView() }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         let view = tab.realize()
-        if view.superview !== nsView {
-            view.removeFromSuperview()
-            view.frame = nsView.bounds
-            view.autoresizingMask = [.width, .height]
-            nsView.addSubview(view)
-        }
-        let obscured = store.panelOverlayObscured
-        view.isHidden = obscured
-        view.setWebWindowVisible(!obscured)
-        // Keep the panel's page live even when visually hidden (persistent panel,
-        // like a background tab).
+        view.setWebWindowVisible(true)
         view.setPageHidden(false)
+        // Host the panel web view in its own child window (not a subview of the
+        // main window), so it has a separate first-responder and can't grab the
+        // main tab's keyboard. Deferred so the placeholder is in a window first.
+        let coordinator = context.coordinator
+        let visible = !store.panelOverlayObscured
+        DispatchQueue.main.async {
+            coordinator.attach(view: view, over: nsView, visible: visible)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: PanelWindowController) {
+        coordinator.teardown()
     }
 }
 

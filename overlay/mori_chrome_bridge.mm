@@ -5,10 +5,12 @@
 
 #import "chrome/browser/ui/mori/MoriBrowserView.h"
 #import "chrome/browser/ui/mori/MoriPrivacy.h"
+#import <objc/message.h>
 #include "chrome/browser/ui/mori/mori_adblock.h"
 #include "chrome/browser/ui/mori/mori_chrome_hooks.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <map>
 #include <set>
@@ -22,6 +24,7 @@
 #include "base/scoped_observation.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/time/time.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/path_service.h"
@@ -34,6 +37,8 @@
 #include "chrome/browser/shell_integration.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
 #include "chrome/browser/ui/navigator/browser_navigator.h"
 #include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
@@ -60,6 +65,7 @@
 // headless Browser (own cookies/cache/storage). See CONTEXT_ISOLATION_DESIGN.md.
 #include <map>
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/lifetime/browser_shutdown.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
@@ -69,6 +75,15 @@
 #include "content/public/browser/download_manager.h"
 #include "components/download/public/common/download_item.h"
 #include "content/public/browser/web_contents_observer.h"
+// Auto picture-in-picture (document-PiP) for conferencing apps (Meet/Zoom/Teams).
+// Millie attaches the tab helper itself and pre-grants the content setting since
+// its headless, Views-less Browser bypasses the usual UI permission flow.
+#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+#include "chrome/browser/picture_in_picture/auto_picture_in_picture_tab_helper.h"
+#include "components/content_settings/core/browser/host_content_settings_map.h"
+#include "components/content_settings/core/common/content_settings.h"
+#include "components/content_settings/core/common/content_settings_pattern.h"
+#include "components/content_settings/core/common/content_settings_types.h"
 #include "base/task/thread_pool.h"
 #include "services/network/public/mojom/clear_data_filter.mojom.h"
 #include "services/network/public/mojom/cookie_manager.mojom.h"
@@ -99,6 +114,27 @@
 + (void)goBack;
 + (void)goForward;
 + (void)toggleSidebar;
+// Menu-bar command targets (see HandleBrowserCommand). All defined in
+// MoriRoot.swift and safe no-ops when there is no active tab/store.
++ (void)reload;
++ (void)forceReload;
++ (void)stop;
++ (void)goHome;
++ (void)zoomIn;
++ (void)zoomOut;
++ (void)resetZoom;
++ (void)toggleFindBar;
++ (void)findNext;
++ (void)findPrevious;
++ (void)toggleDevTools;
++ (void)printPage;
++ (void)selectNextTab;
++ (void)selectPreviousTab;
++ (void)duplicateCurrentTab;
++ (void)togglePinCurrentTab;
++ (void)toggleMuteCurrentTab;
++ (void)closeTabsToRightOfCurrent;
++ (void)newSplit;
 @end
 
 @class MoriBrowserView;
@@ -110,6 +146,17 @@
 
 @interface NSView (MoriRendererKeyForwarding)
 - (NSInteger)keyEvent:(NSEvent*)event;
+@end
+
+// Menu delegate that keeps Millie's retargeted main-menu commands enabled and
+// pointed at MoriRoot. It re-applies on every open (menuNeedsUpdate: fires
+// synchronously, before AppKit's automatic enabling), so it beats Chrome's
+// continuous command-state pushes that otherwise grey these items back out.
+// Installed on each submenu that holds a mapped command (see +installOnMainMenu),
+// chaining any existing delegate (e.g. the History/Tab/Bookmark bridges).
+@interface MoriMenuEnabler : NSObject <NSMenuDelegate>
+@property(nonatomic, weak) id<NSMenuDelegate> previousDelegate;
++ (void)installOnMainMenu;
 @end
 
 // ---------------------------------------------------------------------------
@@ -124,11 +171,11 @@ Browser* g_mori_browser = nullptr;
 // Each is bound to its own persistent Chromium Profile (isolated cookies/cache/
 // storage) and is never shown — its tabs' native views are reparented into the
 // single visible Millie window. Created lazily; erased when the Browser dies.
-std::map<std::string, Browser*> g_profile_browsers;
+base::NoDestructor<std::map<std::string, Browser*>> g_profile_browsers;
 // The active Space's profile key, pushed from Swift on context switch. Resolves
 // which profile extension install/enumeration/management operate on, so each
 // Profile keeps its own extension set (Arc model). "default" = primary profile.
-std::string g_active_profile_key = "default";
+base::NoDestructor<std::string> g_active_profile_key("default");
 // True while a MoriBrowserView is synchronously creating its own tab via
 // Navigate() — the TabStripModel insert observer must not treat that insert
 // as an engine-created orphan (it fires before the view can register).
@@ -152,17 +199,87 @@ Browser* MoriFindBrowserWithTab(content::WebContents* wc) {
   return bwi ? bwi->GetBrowserForMigrationOnly() : nullptr;
 }
 
+// Pre-grant the AUTO_PICTURE_IN_PICTURE content setting to ALLOW for the major
+// video-conferencing origins so Chrome's AutoPictureInPictureTabHelper will
+// auto-open a document-PiP window when the user switches away from the call tab.
+//
+// Why seed instead of relying on the default ("ask") + media-engagement:
+//   * In an Incognito/OTR Space, "ask" is treated as BLOCK by the tab helper
+//     (IsEligibleForAutoPictureInPicture), so conferencing PiP would never fire.
+//   * The normal "ask" -> allow path shows AutoPipSettingHelper's overlay bubble,
+//     which is a Views UI Millie's headless (Views-less) Browser can't present.
+//   * ALLOW also lets MeetsMediaEngagementConditions() short-circuit for the
+//     video-playback path without accrued media engagement.
+// Seeding ALLOW makes auto-PiP deterministic for these hosts across every Space.
+//
+// Idempotent: re-setting the same (pattern, ALLOW) value is a no-op, and we also
+// skip profiles we've already seeded this session. Must run on the UI thread
+// (HostContentSettingsMap requirement) — all callers are UI-thread browser setup.
+void MoriSeedAutoPipContentSettings(Profile* profile) {
+  if (!profile) {
+    return;
+  }
+  static base::NoDestructor<std::set<Profile*>> seeded;
+  if (!seeded->insert(profile).second) {
+    return;  // Already seeded this Profile.
+  }
+  HostContentSettingsMap* settings_map =
+      HostContentSettingsMapFactory::GetForProfile(profile);
+  if (!settings_map) {
+    return;
+  }
+  // `[*.]host` matches the host and all its subdomains; plain host matches only
+  // that host. Secondary pattern is Wildcard so it matches the tab helper's
+  // GetContentSetting(url, url, ...) lookup regardless of scoping.
+  static const char* const kConferencingPatterns[] = {
+      "https://meet.google.com",     // Google Meet
+      "https://[*.]zoom.us",         // Zoom (zoom.us + *.zoom.us)
+      "https://teams.microsoft.com", // Microsoft Teams (work/school)
+      "https://teams.live.com",      // Microsoft Teams (personal)
+      "https://[*.]webex.com",       // Cisco Webex (webex.com + *.webex.com)
+  };
+  for (const char* spec : kConferencingPatterns) {
+    ContentSettingsPattern primary = ContentSettingsPattern::FromString(spec);
+    if (!primary.IsValid()) {
+      NSLog(@"MORI autopip: invalid content-setting pattern %s", spec);
+      continue;
+    }
+    settings_map->SetContentSettingCustomScope(
+        primary, ContentSettingsPattern::Wildcard(),
+        ContentSettingsType::AUTO_PICTURE_IN_PICTURE, CONTENT_SETTING_ALLOW);
+  }
+  NSLog(@"MORI autopip: seeded AUTO_PICTURE_IN_PICTURE=ALLOW for conferencing "
+        @"hosts on profile=%p (otr=%d)",
+        profile, profile->IsOffTheRecord());
+}
+
 std::map<content::WebContents*, __weak MoriBrowserView*>& ViewMap() {
-  static std::map<content::WebContents*, __weak MoriBrowserView*> map;
-  return map;
+  static base::NoDestructor<
+      std::map<content::WebContents*, __weak MoriBrowserView*>>
+      map;
+  return *map;
 }
 
 // Tabs created by the engine (window.open, chrome.tabs.create) waiting for a
-// MoriBrowserView to adopt them, keyed by their URL spec.
-std::multimap<std::string, content::WebContents*>& OrphanMap() {
-  static std::multimap<std::string, content::WebContents*> map;
-  return map;
+// MoriBrowserView to adopt them, keyed by their URL spec. `stashed_at` bounds
+// how long an orphan may be adopted: the designated adopter (created via a
+// PostTask openNewTabWithURL the same tick) claims it within a moment, so a
+// stale orphan is one whose adopter never came — and adopting it under an
+// UNRELATED tab that realizes later is the "tab hijacked another tab's page"
+// bug (a lingering window.open/e-sign popup surfacing under, say, an n8n tab).
+struct OrphanEntry {
+  content::WebContents* contents;
+  base::TimeTicks stashed_at;
+};
+std::multimap<std::string, OrphanEntry>& OrphanMap() {
+  static base::NoDestructor<std::multimap<std::string, OrphanEntry>> map;
+  return *map;
 }
+
+// An orphan older than this is never adopted (it's pruned instead). Generous
+// enough to cover the adopter tab's create→mount→realize hop, tight enough
+// that a truly abandoned popup can't hijack a tab the user opens seconds later.
+constexpr base::TimeDelta kOrphanAdoptTTL = base::Seconds(12);
 
 NSMutableArray<MoriBrowserView*>* AllViews() {
   static NSMutableArray* views = [NSMutableArray array];
@@ -175,13 +292,13 @@ void DetachMoriWebContentsDelegates(Browser* browser) {
   }
   for (auto& entry : ViewMap()) {
     content::WebContents* contents = entry.first;
-    if (contents && contents->GetDelegate() == browser) {
+    if (contents && contents->GetDelegate() == BrowserWebContentsDelegate::From(browser)) {
       contents->SetDelegate(nullptr);
     }
   }
   for (auto& entry : OrphanMap()) {
-    content::WebContents* contents = entry.second;
-    if (contents && contents->GetDelegate() == browser) {
+    content::WebContents* contents = entry.second.contents;
+    if (contents && contents->GetDelegate() == BrowserWebContentsDelegate::From(browser)) {
       contents->SetDelegate(nullptr);
     }
   }
@@ -340,6 +457,90 @@ void InstallStandardEditMenuShortcuts() {
                    NSEventModifierFlagCommand);
 }
 
+// Maps a standard Chrome main-menu command id to the MoriRoot class selector
+// that performs the equivalent Millie action, or nullptr if Millie has no
+// equivalent (those items are left as-is / disabled on purpose). Returns no-arg
+// selectors on MoriRoot (all @objc static funcs), matching the Toggle Sidebar
+// retargeting below.
+// Maps a Chrome main-menu IDC command tag to the matching MoriRoot *class*
+// selector (0-arg @objc static funcs). These are dispatched/validated with an
+// explicit target = [MoriRoot class] (see applyToMenu:), exactly like the
+// working "Toggle Sidebar" item — NOT via the responder chain. Millie's visible
+// window is a plain NSWindow with no Views CommandDispatchingWindow, so target=nil
+// commandDispatch: items find no handler and AppKit greys them out; an explicit
+// class target that responds to the selector validates YES and fires directly.
+SEL MoriSelectorForCommand(NSInteger tag) {
+  switch (tag) {
+    // Edit ▸ Find
+    case IDC_FIND:                 return @selector(toggleFindBar);
+    case IDC_FIND_NEXT:            return @selector(findNext);
+    case IDC_FIND_PREVIOUS:        return @selector(findPrevious);
+    case IDC_FOCUS_SEARCH:         return @selector(focusOmnibox);
+    // View ▸ reload / stop / zoom
+    case IDC_STOP:                 return @selector(stop);
+    case IDC_RELOAD:               return @selector(reload);
+    case IDC_RELOAD_BYPASSING_CACHE:
+    case IDC_RELOAD_CLEARING_CACHE: return @selector(forceReload);
+    case IDC_ZOOM_PLUS:            return @selector(zoomIn);
+    case IDC_ZOOM_MINUS:           return @selector(zoomOut);
+    case IDC_ZOOM_NORMAL:          return @selector(resetZoom);
+    // View ▸ Developer
+    case IDC_DEV_TOOLS:
+    case IDC_DEV_TOOLS_INSPECT:
+    case IDC_DEV_TOOLS_CONSOLE:    return @selector(toggleDevTools);
+    // File ▸ Print, Close Tab
+    case IDC_PRINT:
+    case IDC_BASIC_PRINT:          return @selector(printPage);
+    case IDC_CLOSE_TAB:            return @selector(closeCurrentTab);
+    // History ▸ Home / Back / Forward
+    case IDC_HOME:                 return @selector(goHome);
+    case IDC_BACK:                 return @selector(goBack);
+    case IDC_FORWARD:              return @selector(goForward);
+    // Tab menu
+    case IDC_CYCLE_TO_NEXT_TAB:    return @selector(selectNextTab);
+    case IDC_CYCLE_TO_PREV_TAB:    return @selector(selectPreviousTab);
+    case IDC_DUPLICATE_TAB:
+    case IDC_DUPLICATE_TARGET_TAB: return @selector(duplicateCurrentTab);
+    case IDC_WINDOW_MUTE_SITE:
+    case IDC_MUTE_TARGET_SITE:     return @selector(toggleMuteCurrentTab);
+    case IDC_WINDOW_PIN_TAB:
+    case IDC_PIN_TARGET_TAB:       return @selector(togglePinCurrentTab);
+    case IDC_WINDOW_CLOSE_TABS_TO_RIGHT:
+                                   return @selector(closeTabsToRightOfCurrent);
+    case IDC_NEW_SPLIT_TAB:        return @selector(newSplit);
+    default:                       return nullptr;
+  }
+}
+
+// Run the MoriRoot action for a Chrome main-menu command tag. Returns true if
+// the tag is a browser command Millie services (and dispatched it), false
+// otherwise. MoriSelectorForCommand is the single source of truth for the
+// mapping; every selector it returns is a 0-arg, void @objc class method on
+// MoriRoot, so a plain objc_msgSend invokes it.
+bool MoriRunBrowserCommand(NSInteger tag) {
+  SEL sel = MoriSelectorForCommand(tag);
+  if (!sel) {
+    return false;
+  }
+  using MoriVoidClassMethod = void (*)(id, SEL);
+  ((MoriVoidClassMethod)objc_msgSend)((id)[MoriRoot class], sel);
+  return true;
+}
+
+// Re-point the standard Chrome main-menu items that Millie can service directly
+// at MoriRoot class selectors, exactly as InstallSidebarMenuShortcut does for
+// Toggle Sidebar. This is the only menu path that works in Millie: the visible
+// window is a plain NSWindow (no Views CommandDispatchingWindow), so Chrome's
+// `commandDispatch:` items have no reachable command handler and AppKit greys
+// them out. An explicit target+action is validated/dispatched directly against
+// [MoriRoot class], independent of the key window, so the items light up and
+// invoke the matching SwiftUI action. Items with no Millie equivalent (Save
+// Page As, View Source, Bookmark This/All Tab, Cast, Group Tab, Move Tab to New
+// Window, Search Tabs, …) are left untouched and stay disabled on purpose.
+[[maybe_unused]] void InstallMillieMenuActions() {
+  [MoriMenuEnabler installOnMainMenu];
+}
+
 void InstallSidebarMenuShortcut() {
   NSMenu* mainMenu = NSApp.mainMenu;
   if (!mainMenu) {
@@ -433,6 +634,156 @@ id NSObjectFromValue(const base::Value& value) {
 }
 
 }  // namespace
+
+@implementation MoriMenuEnabler
+
+@synthesize previousDelegate = _previousDelegate;
+
+// NSMenu.delegate is a weak reference, so keep our enablers alive for the app
+// lifetime.
+static NSMutableArray<MoriMenuEnabler*>* MoriMenuEnablers() {
+  static NSMutableArray<MoriMenuEnabler*>* enablers = [NSMutableArray array];
+  return enablers;
+}
+
++ (void)installOnMainMenu {
+  NSMenu* mainMenu = NSApp.mainMenu;
+  if (!mainMenu) {
+    return;
+  }
+  // Walk every menu/submenu; on each one that holds at least one command Millie
+  // services, ensure our enabler is the delegate and re-apply the retargeting.
+  NSMutableArray<NSMenu*>* pending = [NSMutableArray arrayWithObject:mainMenu];
+  while (pending.count > 0) {
+    NSMenu* menu = pending.lastObject;
+    [pending removeLastObject];
+    BOOL hasMapped = NO;
+    for (NSMenuItem* item in menu.itemArray) {
+      if (item.submenu) {
+        [pending addObject:item.submenu];
+      }
+      if (MoriSelectorForCommand(item.tag) && !item.isAlternate) {
+        hasMapped = YES;
+      }
+    }
+    if (!hasMapped) {
+      continue;
+    }
+    // If our enabler is already this menu's delegate (Chrome hasn't rebuilt it),
+    // just re-apply. Otherwise wrap the current delegate so Chrome's dynamic
+    // bridges still run, then apply.
+    if ([menu.delegate isKindOfClass:[MoriMenuEnabler class]]) {
+      [(MoriMenuEnabler*)menu.delegate applyToMenu:menu];
+      continue;
+    }
+    MoriMenuEnabler* enabler = [[MoriMenuEnabler alloc] init];
+    enabler.previousDelegate = menu.delegate;  // chain any existing bridge
+    [MoriMenuEnablers() addObject:enabler];
+    menu.delegate = enabler;
+    [enabler applyToMenu:menu];
+  }
+
+  // Chrome rebuilds the main menu and restores its own disabled commandDispatch:
+  // items whenever the app is activated / a window becomes main (AppController's
+  // windowDidBecomeMain: path). Re-run this walk on those notifications — they
+  // fire reliably for a menu-bar app, and because Chrome's AppController
+  // registered its observers first, ours runs afterward and wins. (The menu bar
+  // is drawn by the system, so NSMenuDidBeginTracking is not posted for it.)
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
+    void (^reapply)(NSNotification*) = ^(NSNotification* note) {
+      [MoriMenuEnabler installOnMainMenu];
+    };
+    [nc addObserverForName:NSApplicationDidBecomeActiveNotification
+                    object:nil
+                     queue:nil
+                usingBlock:reapply];
+    [nc addObserverForName:NSWindowDidBecomeMainNotification
+                    object:nil
+                     queue:nil
+                usingBlock:reapply];
+  });
+}
+
+// Swap each mapped Chrome command item for a fresh plain NSMenuItem targeting
+// [MoriRoot class] (the Toggle Sidebar pattern — the only menu wiring that works
+// in Millie's plain-NSWindow setup). Re-applied on each open in case Chrome
+// rebuilds the items.
+- (void)applyToMenu:(NSMenu*)menu {
+  // Collect the mapped Chrome items first (don't mutate while iterating).
+  NSMutableArray<NSMenuItem*>* toReplace = [NSMutableArray array];
+  for (NSMenuItem* item in menu.itemArray) {
+    if (item.isAlternate) {
+      continue;
+    }
+    if (MoriSelectorForCommand(item.tag)) {
+      [toReplace addObject:item];
+    }
+  }
+  // Replace each Chrome-built command item with a fresh, plain NSMenuItem
+  // targeting [MoriRoot class] — exactly like the working Toggle Sidebar item.
+  // Mutating the existing Chrome item (target/action/enabled/tag) does NOT
+  // stick: Chrome rebuilds these menus (on app activation / when a browser
+  // window becomes key) and restores its own disabled commandDispatch: items,
+  // dropping both our edits and our delegate. We therefore re-run this on every
+  // menu-bar tracking session (see the NSMenuDidBeginTracking observer), which
+  // fires after Chrome's rebuild. A fresh item Chrome does not own stays
+  // enabled and dispatches straight to MoriRoot.
+  for (NSMenuItem* oldItem in toReplace) {
+    NSInteger idx = [menu indexOfItem:oldItem];
+    if (idx < 0) {
+      continue;
+    }
+    SEL sel = MoriSelectorForCommand(oldItem.tag);
+    NSMenuItem* newItem =
+        [[NSMenuItem alloc] initWithTitle:oldItem.title
+                                   action:sel
+                            keyEquivalent:oldItem.keyEquivalent];
+    newItem.keyEquivalentModifierMask = oldItem.keyEquivalentModifierMask;
+    newItem.target = (id)[MoriRoot class];
+    newItem.enabled = YES;
+    [menu removeItemAtIndex:idx];
+    [menu insertItem:newItem atIndex:idx];
+  }
+}
+
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+  // Let any chained bridge (History/Tab/Bookmarks) rebuild its dynamic section
+  // first, then re-assert our commands on top.
+  if ([self.previousDelegate respondsToSelector:@selector(menuNeedsUpdate:)]) {
+    [self.previousDelegate menuNeedsUpdate:menu];
+  }
+  [self applyToMenu:menu];
+}
+
+// menuNeedsUpdate: only fires when the menu is marked dirty; menuWillOpen: fires
+// on every open, so re-assert here too (this is the one that actually runs when
+// the user or AppKit opens the menu).
+- (void)menuWillOpen:(NSMenu*)menu {
+  if ([self.previousDelegate respondsToSelector:@selector(menuWillOpen:)]) {
+    [self.previousDelegate menuWillOpen:menu];
+  }
+  [self applyToMenu:menu];
+}
+
+// Forward all other NSMenuDelegate callbacks to the chained delegate so the
+// bridges keep working.
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+  if ([self.previousDelegate respondsToSelector:aSelector]) {
+    return self.previousDelegate;
+  }
+  return nil;
+}
+
+- (BOOL)respondsToSelector:(SEL)aSelector {
+  if ([super respondsToSelector:aSelector]) {
+    return YES;
+  }
+  return [self.previousDelegate respondsToSelector:aSelector];
+}
+
+@end
 
 // Engine-facing surface of MoriBrowserView (called from the C++ observers).
 @interface MoriBrowserView ()
@@ -611,9 +962,9 @@ class MoriTabStripBridge : public TabStripModelObserver {
       // profile), so popups/AddNewContents route into the matching tab strip
       // instead of forcing a foreign-profile insert into the primary Browser.
       if (Browser* owner = MoriFindBrowserWithTab(wc)) {
-        wc->SetDelegate(owner);
+        wc->SetDelegate(BrowserWebContentsDelegate::From(owner));
       } else if (g_mori_browser) {
-        wc->SetDelegate(g_mori_browser);
+        wc->SetDelegate(BrowserWebContentsDelegate::From(g_mori_browser));
       }
       if (ViewMap().count(wc)) {
         // A Millie-created tab arrived: the startup blank (if any) can go now
@@ -646,7 +997,7 @@ class MoriTabStripBridge : public TabStripModelObserver {
       const std::string spec = url.is_valid() && !url.spec().empty()
                                    ? url.spec()
                                    : std::string("about:blank");
-      OrphanMap().emplace(spec, wc);
+      OrphanMap().emplace(spec, OrphanEntry{wc, base::TimeTicks::Now()});
       // Defer the Millie-side tab creation to the next runloop tick. We are
       // inside TabStripModel::OnTabStripModelChanged — the strip is mid-insert.
       // openNewTab -> peek()/newTab() realizes a WebContents and synchronously
@@ -837,22 +1188,24 @@ void EnsureOnePasswordNativeMessagingManifest() {
 }
 
 void OnBrowserWindowCreated(Browser* browser) {
-  NSLog(@"MORI OnBrowserWindowCreated type=%d existing=%p", (int)browser->type(),
+  NSLog(@"MORI OnBrowserWindowCreated type=%d existing=%p", (int)browser->GetType(),
         g_mori_browser);
-  if (g_mori_browser || browser->type() != Browser::TYPE_NORMAL) {
+  if (g_mori_browser || browser->GetType() != Browser::TYPE_NORMAL) {
     return;
   }
   g_mori_browser = browser;
   browser->tab_strip_model()->AddObserver(MoriTabStripObserver());
+  // Pre-grant auto-PiP for conferencing hosts on the primary (default) profile.
+  MoriSeedAutoPipContentSettings(browser->GetProfile());
   EnsureOnePasswordNativeMessagingManifest();
   NSLog(@"MORI adopted browser %p", browser);
 }
 
 void OnBrowserWindowDestroyed(Browser* browser) {
-  for (auto it = g_profile_browsers.begin(); it != g_profile_browsers.end();
+  for (auto it = g_profile_browsers->begin(); it != g_profile_browsers->end();
        ++it) {
     if (it->second == browser) {
-      g_profile_browsers.erase(it);
+      g_profile_browsers->erase(it);
       break;
     }
   }
@@ -862,14 +1215,64 @@ void OnBrowserWindowDestroyed(Browser* browser) {
   }
 }
 
+}  // namespace mori  (reopened below after the window class)
+
+// Millie's main window. A plain NSWindow is always the tail of its own responder
+// chain — reached after every view but before NSApp / AppController — so it is
+// the one place that reliably services Chrome's target=nil `commandDispatch:`
+// main-menu items no matter what holds first responder (web content, the SwiftUI
+// sidebar, the launcher, or nothing at all). It runs the browser commands Millie
+// owns and forwards everything else to AppController so the app-level commands
+// (New Tab, New Window, …) keep working exactly as before.
+@interface MoriCommandWindow : NSWindow
+@end
+
+@implementation MoriCommandWindow
+- (void)commandDispatch:(id)sender {
+  if (MoriRunBrowserCommand([sender tag])) {
+    return;
+  }
+  id del = NSApp.delegate;
+  if ([del respondsToSelector:@selector(commandDispatch:)]) {
+    [del commandDispatch:sender];
+  }
+}
+- (void)commandDispatchUsingKeyModifiers:(id)sender {
+  if (MoriRunBrowserCommand([sender tag])) {
+    return;
+  }
+  id del = NSApp.delegate;
+  if ([del respondsToSelector:@selector(commandDispatchUsingKeyModifiers:)]) {
+    [del commandDispatchUsingKeyModifiers:sender];
+  }
+}
+- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
+  SEL action = [item action];
+  if (action == @selector(commandDispatch:) ||
+      action == @selector(commandDispatchUsingKeyModifiers:)) {
+    if (MoriSelectorForCommand([item tag])) {
+      return YES;  // a command Millie services — always available
+    }
+    id del = NSApp.delegate;  // forward app-level commands to AppController
+    if ([del respondsToSelector:@selector(validateUserInterfaceItem:)]) {
+      return [del validateUserInterfaceItem:item];
+    }
+    return NO;
+  }
+  return [super validateUserInterfaceItem:item];
+}
+@end
+
+namespace mori {
+
 void EnsureMoriUIStarted(Browser* browser) {
-  NSLog(@"MORI EnsureMoriUIStarted type=%d window=%p", (int)browser->type(),
+  NSLog(@"MORI EnsureMoriUIStarted type=%d window=%p", (int)browser->GetType(),
         g_main_window);
-  if (g_main_window || browser->type() != Browser::TYPE_NORMAL) {
+  if (g_main_window || browser->GetType() != Browser::TYPE_NORMAL) {
     return;
   }
 
-  NSWindow* window = [[NSWindow alloc]
+  NSWindow* window = [[MoriCommandWindow alloc]
       initWithContentRect:NSMakeRect(0, 0, 1280, 820)
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                           NSWindowStyleMaskMiniaturizable |
@@ -897,6 +1300,16 @@ void EnsureMoriUIStarted(Browser* browser) {
     button.alphaValue = 1;
   }
   window.releasedWhenClosed = NO;
+  // EXPERIMENT (gated on MORI_ENABLE_GPU_COMPOSITING): under GPU compositing,
+  // protected video is forced into an AVSampleBufferDisplayLayer with
+  // preventsCapture=YES (ca_renderer_layer_tree.mm). That layer blanks in a
+  // non-opaque window → DRM (Netflix) fails. Make the window opaque so the
+  // protected layer presents. Test whether this alone fixes DRM under GPU
+  // compositing before deciding how to keep it with the rounded/vibrant look.
+  if (std::getenv("MORI_ENABLE_GPU_COMPOSITING")) {
+    window.opaque = YES;
+    window.backgroundColor = NSColor.blackColor;
+  }
   window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentMinSize = NSMakeSize(720, 480);
   window.contentViewController = [MoriRoot makeRootViewController];
@@ -1015,6 +1428,16 @@ void EnsureMoriUIStarted(Browser* browser) {
   }
   InstallStandardEditMenuShortcuts();
   InstallSidebarMenuShortcut();
+  // NOTE: InstallMillieMenuActions() is intentionally disabled. Replacing or
+  // retagging Chrome's main-menu command items (to retarget them at MoriRoot)
+  // does not work — Chrome owns these items, rebuilds them on activation, and
+  // dispatches them through commandDispatch: — and it actively CRASHES: removing
+  // the IDC_NEW_TAB_TO_RIGHT / IDC_WINDOW_CLOSE_TABS_TO_RIGHT items breaks the
+  // CHECK_EQ(count, 2) in -[AppController onVerticalTabStripModeChanged:] on the
+  // next window-becomes-main. The correct fix is a commandDispatch:/
+  // validateUserInterfaceItem: router in the key window's responder chain backed
+  // by MoriRoot (leaving Chrome's items untouched). See follow-up work.
+  // InstallMillieMenuActions();
 }
 
 NSWindow* MoriMainWindow() {
@@ -1090,12 +1513,54 @@ bool HandleBrowserCommand(int command_id) {
     return false;  // UI not up — let Chrome's default command run
   }
   switch (command_id) {
+    // --- Original six (File menu / Spaces) ---
     case IDC_NEW_TAB:              [MoriRoot newTab];           return true;
     case IDC_NEW_WINDOW:           [MoriRoot newWindow];        return true;
     case IDC_NEW_INCOGNITO_WINDOW: [MoriRoot newPrivateWindow]; return true;
     case IDC_RESTORE_TAB:          [MoriRoot reopenClosedTab];  return true;
     case IDC_FOCUS_LOCATION:       [MoriRoot focusOmnibox];     return true;
     case IDC_CLOSE_TAB:            [MoriRoot closeCurrentTab];  return true;
+
+    // --- Find (Edit ▸ Find) ---
+    case IDC_FIND:                 [MoriRoot toggleFindBar];    return true;
+    case IDC_FIND_NEXT:            [MoriRoot findNext];         return true;
+    case IDC_FIND_PREVIOUS:        [MoriRoot findPrevious];     return true;
+    case IDC_FOCUS_SEARCH:         [MoriRoot focusOmnibox];     return true;
+
+    // --- Navigation / reload / zoom (View, History) ---
+    case IDC_BACK:                 [MoriRoot goBack];           return true;
+    case IDC_FORWARD:              [MoriRoot goForward];        return true;
+    case IDC_HOME:                 [MoriRoot goHome];           return true;
+    case IDC_RELOAD:               [MoriRoot reload];           return true;
+    case IDC_RELOAD_BYPASSING_CACHE:
+    case IDC_RELOAD_CLEARING_CACHE: [MoriRoot forceReload];     return true;
+    case IDC_STOP:                 [MoriRoot stop];             return true;
+    case IDC_ZOOM_PLUS:            [MoriRoot zoomIn];           return true;
+    case IDC_ZOOM_MINUS:           [MoriRoot zoomOut];          return true;
+    case IDC_ZOOM_NORMAL:          [MoriRoot resetZoom];        return true;
+
+    // --- Developer (View ▸ Developer) → Millie's DevTools ---
+    case IDC_DEV_TOOLS:
+    case IDC_DEV_TOOLS_INSPECT:
+    case IDC_DEV_TOOLS_CONSOLE:    [MoriRoot toggleDevTools];   return true;
+
+    // --- Print (File) ---
+    case IDC_PRINT:
+    case IDC_BASIC_PRINT:          [MoriRoot printPage];        return true;
+
+    // --- Tab menu actions on the current tab ---
+    case IDC_CYCLE_TO_NEXT_TAB:    [MoriRoot selectNextTab];     return true;
+    case IDC_CYCLE_TO_PREV_TAB:    [MoriRoot selectPreviousTab]; return true;
+    case IDC_DUPLICATE_TAB:
+    case IDC_DUPLICATE_TARGET_TAB: [MoriRoot duplicateCurrentTab]; return true;
+    case IDC_WINDOW_MUTE_SITE:
+    case IDC_MUTE_TARGET_SITE:     [MoriRoot toggleMuteCurrentTab]; return true;
+    case IDC_WINDOW_PIN_TAB:
+    case IDC_PIN_TARGET_TAB:       [MoriRoot togglePinCurrentTab];  return true;
+    case IDC_WINDOW_CLOSE_TABS_TO_RIGHT:
+                                   [MoriRoot closeTabsToRightOfCurrent]; return true;
+    case IDC_NEW_SPLIT_TAB:        [MoriRoot newSplit];          return true;
+
     default:                       return false;
   }
 }
@@ -1195,23 +1660,31 @@ static Browser* MoriBrowserForProfileKey(NSString* profileKey) {
   if (key.empty() || key == "default") {
     return g_mori_browser;
   }
-  auto it = g_profile_browsers.find(key);
-  if (it != g_profile_browsers.end()) {
+  auto it = g_profile_browsers->find(key);
+  if (it != g_profile_browsers->end()) {
     return it->second;
   }
   Profile* profile = MoriProfileFromKey(key);  // synchronous create/load
   if (!profile) {
     return g_mori_browser;
   }
+  BrowserWindowInterface* browser_window = CreateBrowserWindow(
+      BrowserWindowCreateParams(profile, /*from_user_gesture=*/true));
   Browser* browser =
-      Browser::Create(Browser::CreateParams(profile, /*user_gesture=*/true));
+      browser_window ? browser_window->GetBrowserForMigrationOnly() : nullptr;
+  if (!browser) {
+    return g_mori_browser;
+  }
   // Intentionally never call browser->window()->Show(): this is a headless tab
   // container; its tabs' native views are reparented into the visible window.
   // Observe its tab strip so engine-created popups land as Millie tabs too.
   browser->tab_strip_model()->AddObserver(mori::MoriTabStripObserver());
   // Reflect this Space's downloads into DownloadStore too (not just default's).
   mori::EnsureDownloadObserverForProfile(profile);
-  g_profile_browsers[key] = browser;
+  // Pre-grant auto-PiP for conferencing hosts on this isolated Space's profile
+  // (incognito Spaces in particular need ALLOW, since "ask" reads as BLOCK).
+  MoriSeedAutoPipContentSettings(profile);
+  (*g_profile_browsers)[key] = browser;
   NSLog(@"MORI: isolated profile browser key=%s profile=%p browser=%p",
         key.c_str(), profile, browser);
   return browser;
@@ -1246,12 +1719,12 @@ Profile* ActiveProfile() {
   if (!g_mori_browser) {
     return nullptr;
   }
-  Profile* profile = MoriProfileFromKey(g_active_profile_key);
+  Profile* profile = MoriProfileFromKey(*g_active_profile_key);
   return profile ? profile : g_mori_browser->GetProfile();
 }
 
 void SetActiveProfileKey(const std::string& key) {
-  g_active_profile_key = key.empty() ? "default" : key;
+  (*g_active_profile_key) = key.empty() ? "default" : key;
 }
 
 Profile* ProfileForKey(const std::string& key) {
@@ -1265,11 +1738,11 @@ Browser* ActiveBrowser() {
   if (!g_mori_browser) {
     return nullptr;
   }
-  if (g_active_profile_key.empty() || g_active_profile_key == "default") {
+  if (g_active_profile_key->empty() || *g_active_profile_key == "default") {
     return g_mori_browser;
   }
   return MoriBrowserForProfileKey(
-      base::SysUTF8ToNSString(g_active_profile_key));
+      base::SysUTF8ToNSString(*g_active_profile_key));
 }
 
 }  // namespace mori
@@ -1282,10 +1755,12 @@ Browser* ActiveBrowser() {
   double _zoomLevel;
   BOOL _webWindowVisible;
   BOOL _ignoresGlobalWebContentSuppression;
+  BOOL _closeInitiatedLocally;  // -closeBrowser set this; engineWebContentsGone reads+clears it.
   int _browserIdentifier;
 }
 
 @synthesize navDelegate = _navDelegate;
+@synthesize profileKey = _profileKey;
 @synthesize currentURL = _currentURL;
 @synthesize currentTitle = _currentTitle;
 @synthesize isLoading = _isLoading;
@@ -1347,12 +1822,27 @@ Browser* ActiveBrowser() {
   // navigation that drops the relationship.
   {
     Profile* wantProfile = targetBrowser->GetProfile();
+    const base::TimeTicks now = base::TimeTicks::Now();
+    // Drop orphans whose designated adopter never came. A real adopter (the
+    // PostTask'd openNewTabWithURL for this popup) realizes within a moment, so
+    // anything older is abandoned — and leaving it lets an unrelated tab that
+    // realizes seconds/minutes later adopt it (the cross-tab "hijack": a stray
+    // window.open / e-sign popup surfacing under, e.g., an n8n tab). Pruning
+    // also keeps the map from growing without bound.
+    for (auto it = OrphanMap().begin(); it != OrphanMap().end();) {
+      if (now - it->second.stashed_at > kOrphanAdoptTTL) {
+        it = OrphanMap().erase(it);
+      } else {
+        ++it;
+      }
+    }
     content::WebContents* adopted = nullptr;
     auto claimMatching = [&](const std::string& key) {
       auto range = OrphanMap().equal_range(key);
       for (auto it = range.first; it != range.second; ++it) {
-        if (it->second && it->second->GetBrowserContext() == wantProfile) {
-          adopted = it->second;
+        if (it->second.contents &&
+            it->second.contents->GetBrowserContext() == wantProfile) {
+          adopted = it->second.contents;
           OrphanMap().erase(it);
           return true;
         }
@@ -1384,12 +1874,25 @@ Browser* ActiveBrowser() {
   // tabs this is the primary Browser (unchanged); for isolated tabs it's their
   // headless Browser, so window.open popups stay in the same Profile.
   if (Browser* owner = MoriFindBrowserWithTab(webContents)) {
-    webContents->SetDelegate(owner);
+    webContents->SetDelegate(BrowserWebContentsDelegate::From(owner));
   } else if (g_mori_browser) {
-    webContents->SetDelegate(g_mori_browser);
+    webContents->SetDelegate(BrowserWebContentsDelegate::From(g_mori_browser));
   }
   ViewMap()[webContents] = self;
   _bridge = std::make_unique<mori::TabBridge>(webContents, self);
+
+  // Ensure Chrome's AutoPictureInPictureTabHelper is attached so conferencing
+  // apps (Meet/Zoom/Teams) that register the 'enterpictureinpicture' media
+  // session action auto-open a document-PiP window when this tab is switched
+  // away from. Tabs inserted into a real TabStripModel normally get this via
+  // tabs::TabModel/TabHelpers::AttachTabHelpers, but attach defensively here —
+  // this is Millie's single per-tab adoption chokepoint — and guard against a
+  // double-create. The helper triggers off TabStripModel activation changes
+  // (focusBrowser -> ActivateTabAt), which Millie drives on every tab switch.
+  if (webContents &&
+      !AutoPictureInPictureTabHelper::FromWebContents(webContents)) {
+    AutoPictureInPictureTabHelper::CreateForWebContents(webContents);
+  }
 
   NSView* webView = webContents->GetNativeView().GetNativeNSView();
   _webView = webView;
@@ -1409,6 +1912,11 @@ Browser* ActiveBrowser() {
 }
 
 - (void)engineWebContentsGone {
+  // Distinguish an engine-side teardown (window.close(), renderer crash) from a
+  // close Millie itself asked for via -closeBrowser. Only the former needs the
+  // delegate to drop its tab/peek — a Millie-initiated close already removed it.
+  const BOOL engineInitiated = !_closeInitiatedLocally;
+  _closeInitiatedLocally = NO;
   if (_webContents) {
     ViewMap().erase(_webContents);
     _webContents = nullptr;
@@ -1416,6 +1924,37 @@ Browser* ActiveBrowser() {
   _bridge.reset();
   [_webView removeFromSuperview];
   _webView = nil;
+  // During app quit / end-session, Chromium tears down every tab's WebContents
+  // engine-initiated. Routing those teardowns back into the store would empty
+  // the tab strip, make the store mint a fresh replacement new-tab, and then
+  // overwrite session.json with that degenerate state (losing pins and the real
+  // tabs) before prepareForTermination's authoritative save runs. Skip the
+  // delegate entirely while shutting down: the store keeps its live tabs so the
+  // termination save persists the true session. (browser_shutdown::
+  // IsTryingToQuit() is set by CloseAllBrowsersAndQuit before CloseAllBrowsers;
+  // HasShutdownStarted() covers the SIGTERM/end-session path.)
+  if (browser_shutdown::IsTryingToQuit() ||
+      browser_shutdown::HasShutdownStarted()) {
+    return;
+  }
+  if (engineInitiated &&
+      [_navDelegate respondsToSelector:@selector(browserViewDidCloseFromEngine:)]) {
+    // Defer to the next runloop tick: we're on Chromium's WebContents-teardown
+    // stack (TabBridge::WebContentsDestroyed), and the delegate will close a
+    // tab / dismiss a peek — mutating the strip here would re-enter it. This
+    // mirrors how peek()/closePeek() defer their own engine work.
+    __weak MoriBrowserView* weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      MoriBrowserView* strongSelf = weakSelf;
+      if (!strongSelf) {
+        return;
+      }
+      id<MoriBrowserViewDelegate> delegate = strongSelf.navDelegate;
+      if ([delegate respondsToSelector:@selector(browserViewDidCloseFromEngine:)]) {
+        [delegate browserViewDidCloseFromEngine:strongSelf];
+      }
+    });
+  }
 }
 
 // MARK: engine state → delegate
@@ -2120,8 +2659,84 @@ Browser* ActiveBrowser() {
 - (void)redo:(id)sender {
   if (_webContents) _webContents->Redo();
 }
+
+// Main-menu command targets. These are reached the same way Undo/Redo above are:
+// the menu items are set to target=nil with one of these selectors, so AppKit
+// resolves them through the responder chain to this view (the proven path — it's
+// how the Edit menu works in Millie), validates via -validateUserInterfaceItem:
+// below, and dispatches here. Each forwards to the matching MoriRoot action,
+// which operates on the store's selected tab. mori-prefixed so they can't
+// collide with any AppKit/Chromium responder selector.
+- (void)moriReload:(id)sender { [MoriRoot reload]; }
+- (void)moriForceReload:(id)sender { [MoriRoot forceReload]; }
+- (void)moriStop:(id)sender { [MoriRoot stop]; }
+- (void)moriGoHome:(id)sender { [MoriRoot goHome]; }
+- (void)moriGoBack:(id)sender { [MoriRoot goBack]; }
+- (void)moriGoForward:(id)sender { [MoriRoot goForward]; }
+- (void)moriZoomIn:(id)sender { [MoriRoot zoomIn]; }
+- (void)moriZoomOut:(id)sender { [MoriRoot zoomOut]; }
+- (void)moriResetZoom:(id)sender { [MoriRoot resetZoom]; }
+- (void)moriToggleFindBar:(id)sender { [MoriRoot toggleFindBar]; }
+- (void)moriFindNext:(id)sender { [MoriRoot findNext]; }
+- (void)moriFindPrevious:(id)sender { [MoriRoot findPrevious]; }
+- (void)moriFocusOmnibox:(id)sender { [MoriRoot focusOmnibox]; }
+- (void)moriToggleDevTools:(id)sender { [MoriRoot toggleDevTools]; }
+- (void)moriPrintPage:(id)sender { [MoriRoot printPage]; }
+- (void)moriSelectNextTab:(id)sender { [MoriRoot selectNextTab]; }
+- (void)moriSelectPreviousTab:(id)sender { [MoriRoot selectPreviousTab]; }
+- (void)moriDuplicateTab:(id)sender { [MoriRoot duplicateCurrentTab]; }
+- (void)moriTogglePinTab:(id)sender { [MoriRoot togglePinCurrentTab]; }
+- (void)moriToggleMuteTab:(id)sender { [MoriRoot toggleMuteCurrentTab]; }
+- (void)moriCloseTabsToRight:(id)sender { [MoriRoot closeTabsToRightOfCurrent]; }
+- (void)moriNewSplit:(id)sender { [MoriRoot newSplit]; }
+- (void)moriCloseTab:(id)sender { [MoriRoot closeCurrentTab]; }
+
+// Chrome's main-menu browser commands (Reload, Back/Forward, Zoom, Print, Close
+// Tab, Duplicate/Pin/Mute Tab, …) are plain target=nil `commandDispatch:` items
+// tagged with their IDC. In Chrome they dispatch through the browser window's
+// command controller — which Millie's plain NSWindow doesn't have, so AppKit
+// greyed them out. Rather than rewrite Chrome's menu items (it rebuilds them on
+// activation and CHECKs their tags), we handle `commandDispatch:` right here:
+// MoriBrowserView is already in the key window's responder chain (that's how the
+// Edit menu's undo:/redo: reach us), RWHVCocoa doesn't implement
+// commandDispatch:, and AppController (the app delegate) is further down the
+// chain. So the menu resolves these to us. We service the commands Millie owns
+// and forward everything else (New Tab, New Window, …) to AppController so its
+// app-level commands keep working exactly as before.
+- (void)commandDispatch:(id)sender {
+  if (MoriRunBrowserCommand([sender tag])) {
+    return;
+  }
+  id del = NSApp.delegate;  // forward app-level commands to AppController
+  if ([del respondsToSelector:@selector(commandDispatch:)]) {
+    [del commandDispatch:sender];
+  }
+}
+
+- (void)commandDispatchUsingKeyModifiers:(id)sender {
+  if (MoriRunBrowserCommand([sender tag])) {
+    return;
+  }
+  id del = NSApp.delegate;
+  if ([del respondsToSelector:@selector(commandDispatchUsingKeyModifiers:)]) {
+    [del commandDispatchUsingKeyModifiers:sender];
+  }
+}
+
 - (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
   SEL action = [item action];
+  if (action == @selector(commandDispatch:) ||
+      action == @selector(commandDispatchUsingKeyModifiers:)) {
+    if (MoriSelectorForCommand([item tag])) {
+      return YES;  // a command Millie services — always available
+    }
+    // Not ours: let AppController decide (so New Tab/New Window/… stay correct).
+    id del = NSApp.delegate;
+    if ([del respondsToSelector:@selector(validateUserInterfaceItem:)]) {
+      return [del validateUserInterfaceItem:item];
+    }
+    return NO;
+  }
   if (action == @selector(undo:) || action == @selector(redo:)) {
     return _webContents != nullptr;
   }
@@ -2413,6 +3028,10 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
   const int index = model ? model->GetIndexOfWebContents(_webContents)
                           : TabStripModel::kNoTab;
   if (index != TabStripModel::kNoTab) {
+    // Mark this teardown as Millie-initiated so engineWebContentsGone doesn't
+    // report it back to the delegate as an engine-side close (which would try
+    // to close the tab a second time).
+    _closeInitiatedLocally = YES;
     model->CloseWebContentsAt(index, TabCloseTypes::CLOSE_USER_GESTURE |
                                          TabCloseTypes::CLOSE_CREATE_HISTORICAL_TAB);
   }
@@ -2459,7 +3078,7 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
     partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
         base::DoNothing());
   }
-  for (const auto& entry : g_profile_browsers) {
+  for (const auto& entry : *g_profile_browsers) {
     if (entry.second) {
       entry.second->GetProfile()
           ->GetDefaultStoragePartition()

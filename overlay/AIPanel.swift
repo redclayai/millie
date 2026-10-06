@@ -30,8 +30,28 @@ struct AIPanel: View {
         }
         .frame(width: 360)
         .task { await assistant.loadModelCatalogIfNeeded() }
+        // Launcher "Add tabs or files" flow: consume a staged request on first
+        // appear (the panel was just opened for it) and on any later change
+        // (the panel was already open).
+        .onAppear { consumeLauncherRequest() }
+        .onChange(of: store.aiLauncherRequest) { _, _ in consumeLauncherRequest() }
         // No own background: the unified chrome surface (set on the root) shows
         // through, so the panel follows the selected theme like the sidebar.
+    }
+
+    /// Forward a launcher-staged Ask-Millie request to the assistant: send the
+    /// question with its attachment context, or (empty question) stage the
+    /// context and focus the composer so the user can type.
+    private func consumeLauncherRequest() {
+        guard let req = store.aiLauncherRequest else { return }
+        store.aiLauncherRequest = nil
+        let question = req.question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if question.isEmpty {
+            assistant.stageContext(title: req.title, text: req.context)
+            inputFocused = true
+        } else {
+            assistant.sendWithContext(question, title: req.title, text: req.context)
+        }
     }
 
     private var header: some View {
