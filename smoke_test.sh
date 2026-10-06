@@ -36,7 +36,7 @@ sleep 8
 pgrep -x Millie >/dev/null || FAILS+=("browser process died within 8s")
 
 # 2. Renderer + network service helpers exist (page actually loading).
-pgrep -f 'Chromium Helper \(Renderer\)' >/dev/null || FAILS+=("no renderer process")
+pgrep -f 'Chromium Helper \((Aperitif )?Renderer\)' >/dev/null || FAILS+=("no renderer process")
 pgrep -f 'network.mojom.NetworkService' >/dev/null || FAILS+=("no network service")
 
 # 3. Health signals from the app's stderr (Millie-specific subsystems). Read the

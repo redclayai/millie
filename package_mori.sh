@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SRC_APP="/Users/dannybaute/mori-browser-build/build/src/out/Default/Chromium.app"
-OVERLAY="/Users/dannybaute/mori-browser/ungoogled-chromium-macos/build/src/chrome/browser/ui/mori"
+OVERLAY="/Users/dannybaute/mori-browser-build/build/src/chrome/browser/ui/mori"
 APP="${MILLIE_APP:-$HOME/mori-browser-build/Millie.app}"
 
 echo "==> ditto Chromium.app -> $APP"
@@ -68,6 +68,10 @@ plutil -remove CFBundleIconName "$APP/Contents/Info.plist" 2>/dev/null || true
 if [ -f "$RES/en.lproj/InfoPlist.strings" ]; then
   plutil -replace CFBundleDisplayName -string 'Millie' "$RES/en.lproj/InfoPlist.strings" 2>/dev/null || true
 fi
+
+echo "==> usage descriptions (dictation; missing = TCC hard-crash)"
+plutil -replace NSMicrophoneUsageDescription -string 'Millie uses the microphone so you can dictate into the search bar and the assistant.' "$APP/Contents/Info.plist"
+plutil -replace NSSpeechRecognitionUsageDescription -string 'Millie uses speech recognition to turn what you say into text in the search bar.' "$APP/Contents/Info.plist"
 
 echo "==> rename main executable -> Millie (Process name in Activity Monitor / crash reports)"
 # Only the outer launcher is renamed. Helpers + bundle id stay org.chromium.Chromium
