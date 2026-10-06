@@ -196,7 +196,7 @@ BOOL g_mori_auto_pip = YES;
 Browser* MoriFindBrowserWithTab(content::WebContents* wc) {
   BrowserWindowInterface* bwi =
       GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(wc);
-  return bwi ? bwi->GetBrowserForMigrationOnly() : nullptr;
+  return bwi ? static_cast<Browser*>(bwi) : nullptr;  // 154: Browser still derives from BrowserWindowInterface
 }
 
 // Pre-grant the AUTO_PICTURE_IN_PICTURE content setting to ALLOW for the major
@@ -1671,7 +1671,7 @@ static Browser* MoriBrowserForProfileKey(NSString* profileKey) {
   BrowserWindowInterface* browser_window = CreateBrowserWindow(
       BrowserWindowCreateParams(profile, /*from_user_gesture=*/true));
   Browser* browser =
-      browser_window ? browser_window->GetBrowserForMigrationOnly() : nullptr;
+      browser_window ? static_cast<Browser*>(browser_window) : nullptr;
   if (!browser) {
     return g_mori_browser;
   }
