@@ -142,6 +142,7 @@
 @interface MoriBrowserView (MoriFocusPrivate)
 - (BOOL)canReceiveBrowserFocus;
 - (BOOL)containsEventLocation:(NSEvent*)event;
+- (BOOL)ownsFirstResponder:(NSResponder*)responder;
 @end
 
 @interface NSView (MoriRendererKeyForwarding)
@@ -317,7 +318,19 @@ MoriBrowserView* ActiveMoriBrowserView() {
   return it == ViewMap().end() ? nil : it->second;
 }
 
+// In split view two web views are on screen at once. Key events must go to the
+// pane that actually holds keyboard focus (the one the user clicked into), not
+// always the active tab's pane — otherwise copy/paste/undo typed in the right
+// pane land on the left one.
 MoriBrowserView* FirstFocusableMoriBrowserView() {
+  NSResponder* focused = NSApp.keyWindow.firstResponder;
+  if (focused) {
+    for (MoriBrowserView* view in [AllViews() reverseObjectEnumerator]) {
+      if ([view canReceiveBrowserFocus] && [view ownsFirstResponder:focused]) {
+        return view;
+      }
+    }
+  }
   MoriBrowserView* active = ActiveMoriBrowserView();
   if ([active canReceiveBrowserFocus]) {
     return active;
@@ -803,6 +816,7 @@ static NSMutableArray<MoriMenuEnabler*>* MoriMenuEnablers() {
 - (BOOL)ensureRendererFirstResponderForKeyEvent:(NSEvent*)event;
 - (BOOL)forwardRendererEditShortcutIfNeeded:(NSEvent*)event;
 - (BOOL)containsEventLocation:(NSEvent*)event;
+- (BOOL)ownsFirstResponder:(NSResponder*)responder;
 - (void)applySuppressionState;
 @end
 
@@ -2358,6 +2372,19 @@ Browser* ActiveBrowser() {
   });
 }
 
+- (BOOL)ownsFirstResponder:(NSResponder*)responder {
+  if (!_webContents || ![responder isKindOfClass:[NSView class]]) {
+    return NO;
+  }
+  NSView* view = static_cast<NSView*>(responder);
+  content::RenderWidgetHostView* renderView =
+      _webContents->GetRenderWidgetHostView();
+  NSView* rendererNativeView =
+      renderView ? renderView->GetNativeView().GetNativeNSView() : nil;
+  return (rendererNativeView && [view isDescendantOf:rendererNativeView]) ||
+         [view isDescendantOf:self];
+}
+
 - (BOOL)canReceiveBrowserFocus {
   return _webContents && !self.isHidden && _webWindowVisible &&
          !_webView.hidden && self.window;
@@ -2491,6 +2518,21 @@ Browser* ActiveBrowser() {
   }
   if (IsNativeTextInputFirstResponder(window.firstResponder)) {
     return NO;
+  }
+  // Undo/redo go straight to the web contents. The old route (make the renderer
+  // first responder, then sendAction undo: down the responder chain) silently
+  // dropped ⌘Z whenever any step of that focus dance failed. WebContents::Undo
+  // acts on the focused frame's editable, which is exactly what ⌘Z should do.
+  if ((commandOnly && keyCode == 6) || redoShortcut) {
+    if (!window.isKeyWindow) {
+      [window makeKeyWindow];
+    }
+    if (commandOnly) {
+      _webContents->Undo();
+    } else {
+      _webContents->Redo();
+    }
+    return YES;
   }
   if (!window.isKeyWindow) {
     [window makeKeyWindow];

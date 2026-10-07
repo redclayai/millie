@@ -24,7 +24,7 @@ echo "==> wiring overlay assets (Bundle.main = outer app Resources)"
 # (the runtime path is "MoriGlyphs" — an internal name, left unchanged).
 /usr/bin/ditto "$OVERLAY/glyphs/"      "$RES/MoriGlyphs/"
 # App icon (CFBundleIconFile=app.icns).
-/usr/bin/ditto "$OVERLAY/AppIcon.icns" "$RES/app.icns"
+/usr/bin/ditto "/Users/dannybaute/mori-browser-build/millie/AppIcon.icns" "$RES/app.icns"
 # Bundled Google Sans (OFL) faces — FontRegistry registers Resources/Fonts/*.ttf
 # at launch so Typography.ui() resolves to "Google Sans".
 FONTS_SRC="/Users/dannybaute/mori-browser-build/millie/fonts"
