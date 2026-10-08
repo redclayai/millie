@@ -335,6 +335,60 @@ final class BrowserSettings: ObservableObject {
         MoriBrowserView.setAutoPiPEnabled(autoPiP)
         MoriBrowserView.setAdBlockerEnabled(blockAds)
     }
+
+    // MARK: Cross-Mac sync
+
+    /// UserDefaults keys that follow the user across Macs. Deliberately excludes
+    /// per-machine / secret state: the first-run welcome flag, the AI provider
+    /// choice and per-provider model overrides (API keys live in the Keychain
+    /// and are never synced).
+    static var syncedDefaultsKeys: [String] {
+        [Key.homepage, Key.newTab, Key.engine, Key.customEngine, Key.blockAds,
+         Key.safeBrowsing, Key.aiIntegrationEnabled, Key.sharesPageWithAI,
+         Key.theme, Key.sidebarOnLaunch, Key.sidebarPosition, Key.sidebarWidth,
+         Key.gradientTheme, Key.autoPiP, Key.autoSleepMinutes, Key.splitRatio,
+         Key.tintedFolderCards, Key.peekPinnedLinks, Key.webPanels,
+         Key.webPanelWidth, Key.autoArchiveHours, Key.tabCycleOrder]
+    }
+
+    /// Re-read the synced keys from UserDefaults after a remote sync wrote them,
+    /// so the live (observed) properties and the engine pick up the new values.
+    func reloadFromDefaults() {
+        let d = defaults
+        func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<BrowserSettings, T>, _ value: T) {
+            if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+        }
+        if let v = d.string(forKey: Key.homepage) { set(\.homepageURL, v) }
+        set(\.newTabBehavior, NewTabBehavior(rawValue: d.string(forKey: Key.newTab) ?? "") ?? .homepage)
+        set(\.searchEngine, SearchEngine(rawValue: d.string(forKey: Key.engine) ?? "") ?? .google)
+        if let v = d.string(forKey: Key.customEngine) { set(\.customSearchTemplate, v) }
+        if let v = d.object(forKey: Key.blockAds) as? Bool { set(\.blockAds, v) }
+        if let v = d.object(forKey: Key.safeBrowsing) as? Bool { set(\.safeBrowsingEnabled, v) }
+        if let v = d.object(forKey: Key.aiIntegrationEnabled) as? Bool { set(\.aiIntegrationEnabled, v) }
+        if let v = d.object(forKey: Key.sharesPageWithAI) as? Bool { set(\.sharesPageWithAI, v) }
+        set(\.theme, ThemePreference(rawValue: d.string(forKey: Key.theme) ?? "") ?? .system)
+        if let v = d.object(forKey: Key.sidebarOnLaunch) as? Bool { set(\.showSidebarOnLaunch, v) }
+        set(\.sidebarPosition, SidebarPosition(rawValue: d.string(forKey: Key.sidebarPosition) ?? "") ?? .left)
+        if let w = d.object(forKey: Key.sidebarWidth) as? Double {
+            set(\.sidebarWidth, CGFloat(w).clamped(to: BrowserSettings.minSidebarWidth...BrowserSettings.maxSidebarWidth))
+        }
+        if let data = d.data(forKey: Key.gradientTheme),
+           let theme = try? JSONDecoder().decode(GradientTheme.self, from: data) {
+            gradientTheme = theme
+        }
+        if let v = d.object(forKey: Key.autoPiP) as? Bool { set(\.autoPiP, v); MoriBrowserView.setAutoPiPEnabled(v) }
+        if let v = d.object(forKey: Key.autoSleepMinutes) as? Int { set(\.autoSleepMinutes, v) }
+        if let v = d.object(forKey: Key.splitRatio) as? Double { set(\.splitRatio, v) }
+        if let v = d.object(forKey: Key.tintedFolderCards) as? Bool { set(\.tintedFolderCards, v) }
+        if let v = d.object(forKey: Key.peekPinnedLinks) as? Bool { set(\.peekPinnedLinks, v) }
+        if let data = d.data(forKey: Key.webPanels),
+           let panels = try? JSONDecoder().decode([WebPanel].self, from: data) {
+            webPanels = panels
+        }
+        if let v = d.object(forKey: Key.webPanelWidth) as? Double { set(\.webPanelWidth, v) }
+        if let v = d.object(forKey: Key.autoArchiveHours) as? Int { set(\.autoArchiveHours, v) }
+        set(\.tabCycleOrder, TabCycleOrder(rawValue: d.string(forKey: Key.tabCycleOrder) ?? "") ?? .recentlyUsed)
+    }
 }
 
 extension Comparable {

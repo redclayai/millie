@@ -75,6 +75,12 @@ final class RouteStore: ObservableObject {
         if rules.count != before { scheduleSave() }
     }
 
+    /// Replace all rules (used by cross-Mac settings sync).
+    func replaceAll(_ new: [RoutingRule]) {
+        rules = new
+        scheduleSave()
+    }
+
     // MARK: Persistence
 
     private func load() {

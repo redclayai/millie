@@ -20,7 +20,7 @@ final class AdBlockStore: ObservableObject {
     /// (lowercase, no trailing dot, no leading "www.").
     @Published private(set) var allowedHosts: Set<String>
 
-    private static let allowlistKey = "mori.adblockAllowlist"
+    static let allowlistKey = "mori.adblockAllowlist"
 
     private init() {
         let saved = UserDefaults.standard.stringArray(forKey: Self.allowlistKey) ?? []
@@ -52,6 +52,13 @@ final class AdBlockStore: ObservableObject {
         } else {
             allowedHosts.remove(h)
         }
+        UserDefaults.standard.set(allowedHosts.sorted(), forKey: Self.allowlistKey)
+        MoriBrowserView.setAdBlockerAllowedHosts(Array(allowedHosts))
+    }
+
+    /// Replace the whole allowlist (used by cross-Mac settings sync).
+    func replaceAllowedHosts(_ hosts: [String]) {
+        allowedHosts = Set(hosts.compactMap(Self.normalize))
         UserDefaults.standard.set(allowedHosts.sorted(), forKey: Self.allowlistKey)
         MoriBrowserView.setAdBlockerAllowedHosts(Array(allowedHosts))
     }

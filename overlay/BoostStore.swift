@@ -148,6 +148,12 @@ final class BoostStore: ObservableObject {
         return String(array.dropFirst().dropLast())
     }
 
+    /// Replace all Boosts (used by cross-Mac settings sync).
+    func replaceAll(_ new: [SiteBoost]) {
+        boosts = new
+        scheduleSave()
+    }
+
     // MARK: Persistence
 
     private func load() {

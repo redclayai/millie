@@ -76,6 +76,10 @@ final class MillieSync: ObservableObject {
         BookmarkStore.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
         HistoryStore.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
         ArchiveStore.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
+        BrowserSettings.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
+        BoostStore.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
+        RouteStore.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
+        AdBlockStore.shared.objectWillChange.sink { [weak self] in self?.schedulePush() }.store(in: &bag)
 
         if refreshToken != nil {
             Task { await refreshSession(); if accessToken != nil { isSignedIn = true; await startSyncing() } }
@@ -194,6 +198,7 @@ final class MillieSync: ObservableObject {
         await upsert("millie_bookmarks", bookmarks)
         await upsert("millie_history", history)
         await upsert("millie_archive", archive)
+        await pushSettings()
 
         // A PINNED tab is an intentional keep. Its cloud row may be tombstoned
         // (deleted=true) from another device closing its twin — and the upsert
@@ -235,6 +240,7 @@ final class MillieSync: ObservableObject {
 
     private func pull() async {
         guard isSignedIn else { return }
+        await pullSettings()
         // Library merge (safe, additive).
         if let rows: [BookmarkRow] = try? await select("millie_bookmarks") {
             let local = Set(BookmarkStore.shared.bookmarks.map(\.url))
@@ -242,15 +248,20 @@ final class MillieSync: ObservableObject {
                 _ = BookmarkStore.shared.toggle(url: r.url, title: r.title)
             }
         }
-        if let rows: [HistoryRow] = try? await select("millie_history") {
+        // History + archive are large (tens of thousands of rows) and the REST
+        // API caps a plain select at 1000 rows, so page them: the first sync
+        // imports the newest few thousand, later syncs only fetch what changed.
+        let historyRows: [HistoryRow] = await pullIncremental("millie_history")
+        if !historyRows.isEmpty {
             let local = Set(HistoryStore.shared.entries.map(\.url))
-            for r in rows where !local.contains(r.url) {
+            for r in historyRows where !local.contains(r.url) {
                 HistoryStore.shared.record(url: r.url, title: r.title)
             }
         }
-        if let rows: [ArchiveRow] = try? await select("millie_archive") {
+        let archiveRows: [ArchiveRow] = await pullIncremental("millie_archive")
+        if !archiveRows.isEmpty {
             let local = Set(ArchiveStore.shared.tabs.map(\.url))
-            for r in rows where !local.contains(r.url) {
+            for r in archiveRows where !local.contains(r.url) {
                 ArchiveStore.shared.add(url: r.url, title: r.title, faviconURL: r.favicon_url)
             }
         }
@@ -469,11 +480,13 @@ private struct BookmarkRow: Codable {
 
 private struct HistoryRow: Codable {
     var id: UUID; var url: String; var title: String; var last_visited: String; var visit_count: Int
+    var updated_at: String? = nil
     init(_ m: HistoryEntry) { id = m.id; url = m.url; title = m.title; last_visited = ISO.string(m.lastVisited); visit_count = m.visitCount }
 }
 
 private struct ArchiveRow: Codable {
     var id: UUID; var url: String; var title: String; var favicon_url: String?; var archived_at: String
+    var updated_at: String? = nil
     init(_ m: ArchivedTab) { id = m.id; url = m.url; title = m.title; favicon_url = m.faviconURL; archived_at = ISO.string(m.archivedAt) }
     func encode(to e: Encoder) throws {
         var c = e.container(keyedBy: CodingKeys.self)
@@ -488,3 +501,220 @@ private struct CommandRow: Codable {
 
 /// Just the primary key — used to read tombstoned (deleted=true) ids.
 private struct IDRow: Decodable { var id: UUID }
+
+
+// MARK: - Library paging (history / archive)
+
+/// Rows that expose the server's `updated_at` so paging can resume from it.
+private protocol UpdatedAtRow { var updated_at: String? { get } }
+extension HistoryRow: UpdatedAtRow {}
+extension ArchiveRow: UpdatedAtRow {}
+
+extension MillieSync {
+    private static let firstSyncLimit = 2000
+    private static let pageSize = 1000
+    private static let maxPagesPerPull = 5
+
+    /// Fetch rows changed since the last pull, newest-first on the very first
+    /// sync (capped) and oldest-first afterwards (so the cursor only moves
+    /// forward). The cursor is the max `updated_at` seen, kept per table.
+    fileprivate func pullIncremental<T: Decodable>(_ table: String) async -> [T] {
+        let cursorKey = "millie.sync.cursor.\(table)"
+        let defaults = UserDefaults.standard
+        var out: [T] = []
+        if let since = defaults.string(forKey: cursorKey) {
+            var cursor = since
+            for _ in 0..<Self.maxPagesPerPull {
+                let enc = cursor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? cursor
+                guard let page: [T] = try? await select(
+                        table,
+                        filter: "deleted=eq.false&updated_at=gt.\(enc)&order=updated_at.asc&limit=\(Self.pageSize)"),
+                      !page.isEmpty else { break }
+                out += page
+                if let last = (page.last as? UpdatedAtRow)?.updated_at { cursor = last } else { break }
+                defaults.set(cursor, forKey: cursorKey)
+                if page.count < Self.pageSize { break }
+            }
+        } else if let page: [T] = try? await select(
+                    table,
+                    filter: "deleted=eq.false&order=updated_at.desc&limit=\(Self.firstSyncLimit)") {
+            out = page
+            if let newest = (page.first as? UpdatedAtRow)?.updated_at {
+                defaults.set(newest, forKey: cursorKey)
+            }
+        }
+        return out
+    }
+}
+
+// MARK: - Settings / Boosts / Routing-rule sync
+
+/// Minimal JSON value so arbitrary preference values round-trip through the
+/// `millie_settings.value` jsonb column.
+private enum JSONValue: Codable, Equatable {
+    case null, bool(Bool), number(Double), string(String)
+    case array([JSONValue]), object([String: JSONValue])
+
+    init(from d: Decoder) throws {
+        let c = try d.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let v = try? c.decode(Bool.self) { self = .bool(v) }
+        else if let v = try? c.decode(Double.self) { self = .number(v) }
+        else if let v = try? c.decode(String.self) { self = .string(v) }
+        else if let v = try? c.decode([JSONValue].self) { self = .array(v) }
+        else { self = .object(try c.decode([String: JSONValue].self)) }
+    }
+    func encode(to e: Encoder) throws {
+        var c = e.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let v): try c.encode(v)
+        case .number(let v): try c.encode(v)
+        case .string(let v): try c.encode(v)
+        case .array(let v): try c.encode(v)
+        case .object(let v): try c.encode(v)
+        }
+    }
+}
+
+private struct SettingRow: Codable {
+    var key: String
+    var value: JSONValue
+    var updated_at: String
+    var deleted: Bool = false
+}
+
+extension MillieSync {
+    private enum SK {
+        static let boosts = "boosts"
+        static let routes = "routes"
+        static let pushed = "millie.sync.settings.pushed"
+        static let lastPull = "millie.sync.settings.lastPull"
+    }
+
+    /// Everything that syncs, as `key -> value`. UserDefaults keys keep their own
+    /// names; Boosts and routing rules sync as whole documents.
+    private func settingsSnapshot() -> [String: JSONValue] {
+        let d = UserDefaults.standard
+        var snap: [String: JSONValue] = [:]
+        for key in BrowserSettings.syncedDefaultsKeys + [AdBlockStore.allowlistKey] {
+            guard let obj = d.object(forKey: key) else { continue }
+            if let v = Self.jsonValue(fromDefaults: obj) { snap[key] = v }
+        }
+        if let v = Self.jsonValue(fromCodable: BoostStore.shared.boosts) { snap[SK.boosts] = v }
+        if let v = Self.jsonValue(fromCodable: RouteStore.shared.rules) { snap[SK.routes] = v }
+        return snap
+    }
+
+    private static func jsonValue(fromDefaults obj: Any) -> JSONValue? {
+        switch obj {
+        case let data as Data: return .object(["_data": .string(data.base64EncodedString())])
+        case let s as String: return .string(s)
+        case let arr as [String]: return .array(arr.map { .string($0) })
+        case let n as NSNumber:
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return .bool(n.boolValue) }
+            return .number(n.doubleValue)
+        default: return nil
+        }
+    }
+
+    private static func defaultsObject(from v: JSONValue) -> Any? {
+        switch v {
+        case .bool(let b): return b
+        case .number(let n): return n == n.rounded() && abs(n) < 1e9 ? Int(n) : n
+        case .string(let s): return s
+        case .array(let a): return a.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
+        case .object(let o):
+            if case .string(let b64)? = o["_data"] { return Data(base64Encoded: b64) }
+            return nil
+        case .null: return nil
+        }
+    }
+
+    private static func jsonValue<T: Encodable>(fromCodable value: T) -> JSONValue? {
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return try? JSONDecoder().decode(JSONValue.self, from: data)
+    }
+
+    private static func decode<T: Decodable>(_ type: T.Type, from v: JSONValue) -> T? {
+        guard let data = try? JSONEncoder().encode(v) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func lastPushed() -> [String: JSONValue]? {
+        guard let data = UserDefaults.standard.data(forKey: SK.pushed) else { return nil }
+        return try? JSONDecoder().decode([String: JSONValue].self, from: data)
+    }
+
+    private func storeLastPushed(_ m: [String: JSONValue]) {
+        if let data = try? JSONEncoder().encode(m) { UserDefaults.standard.set(data, forKey: SK.pushed) }
+    }
+
+    /// Push only the settings that changed on this Mac since the last push.
+    /// A Mac that has never synced pushes nothing it already received from the
+    /// cloud (pullSettings runs first and records those as pushed).
+    fileprivate func pushSettings() async {
+        let snap = settingsSnapshot()
+        var last = lastPushed() ?? [:]
+        let changed = snap.filter { last[$0.key] != $0.value }
+        guard !changed.isEmpty else { return }
+        let now = ISO.now()
+        let rows = changed.map { SettingRow(key: $0.key, value: $0.value, updated_at: now) }
+        do {
+            var req = request("/rest/v1/millie_settings?on_conflict=user_id,key", method: "POST")
+            req.setValue("resolution=merge-duplicates", forHTTPHeaderField: "Prefer")
+            req.httpBody = try JSONEncoder().encode(rows)
+            _ = try await send(req)
+            for (k, v) in changed { last[k] = v }
+            storeLastPushed(last)
+        } catch { /* retry on the next push */ }
+    }
+
+    /// Apply settings changed on another Mac. On a Mac's first sync the cloud
+    /// wins for any key that exists there; afterwards a remote value only
+    /// applies when this Mac hasn't changed that setting itself since its last
+    /// push (so a local edit is never silently overwritten).
+    fileprivate func pullSettings() async {
+        let d = UserDefaults.standard
+        let firstSync = lastPushed() == nil
+        var filter = "order=updated_at.asc&limit=1000"
+        if let since = d.string(forKey: SK.lastPull),
+           let enc = since.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            filter += "&updated_at=gt.\(enc)"
+        }
+        guard let rows: [SettingRow] = try? await select("millie_settings", filter: "deleted=eq.false&\(filter)"),
+              !rows.isEmpty else { return }
+
+        let snap = settingsSnapshot()
+        var last = lastPushed() ?? [:]
+        var touchedDefaults = false, touchedAdblock = false
+        applyingRemote = true
+        for r in rows {
+            let localChangedSinceLastPush = !firstSync && snap[r.key] != last[r.key]
+            if snap[r.key] == r.value { last[r.key] = r.value; continue }
+            if localChangedSinceLastPush { continue }   // local edit wins; it will push
+            switch r.key {
+            case SK.boosts:
+                if let v = Self.decode([SiteBoost].self, from: r.value) { BoostStore.shared.replaceAll(v) }
+            case SK.routes:
+                if let v = Self.decode([RoutingRule].self, from: r.value) { RouteStore.shared.replaceAll(v) }
+            case AdBlockStore.allowlistKey:
+                if case .array(let a) = r.value {
+                    AdBlockStore.shared.replaceAllowedHosts(a.compactMap { if case .string(let s) = $0 { return s } else { return nil } })
+                    touchedAdblock = true
+                }
+            default:
+                guard BrowserSettings.syncedDefaultsKeys.contains(r.key),
+                      let obj = Self.defaultsObject(from: r.value) else { continue }
+                d.set(obj, forKey: r.key)
+                touchedDefaults = true
+            }
+            last[r.key] = r.value
+        }
+        if touchedDefaults { BrowserSettings.shared.reloadFromDefaults() }
+        _ = touchedAdblock
+        applyingRemote = false
+        storeLastPushed(last)
+        if let newest = rows.last?.updated_at { d.set(newest, forKey: SK.lastPull) }
+    }
+}
