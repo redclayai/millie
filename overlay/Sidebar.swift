@@ -526,7 +526,6 @@ private struct RootList: View {
             onSelect: { store.selectTab(tab.id) },
             onClose: { store.closeTab(tab.id) }
         )
-        .transition(.tabClose)
         .overlay {
             if splitDropTargetID == tab.id {
                 RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
@@ -822,8 +821,7 @@ private struct FolderRow: View {
                         onIconTap: { store.resetFolderedTabToHome(tab.id) }
                     )
                     .padding(.leading, 16)
-                    .transition(.tabClose)
-                    .overlay {
+                                .overlay {
                         if splitDropTargetID == tab.id {
                             RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
                                 .strokeBorder(p.primary.color, lineWidth: 2)

@@ -1086,7 +1086,10 @@ final class BrowserStore: ObservableObject {
         media.forgetTab(browserId: mediaBrowserId)
         // Animate the removal so the sidebar row fades + shrinks and the rows
         // below collapse up into the gap, matching Zen's `animateItemClose`.
-        withAnimation(Motion.tabClose) {
+        // No close animation: a removal transition keeps the row in the view
+        // tree until it finishes, and when it never finishes (SwiftUI hosted in
+        // Chromium) an invisible row lingers and leaves a gap in the sidebar.
+        do {
             tabs.remove(at: idx)
             for contextIndex in contexts.indices {
                 contexts[contextIndex].tabIDs.removeAll { $0 == id }
