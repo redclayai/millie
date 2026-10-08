@@ -542,6 +542,44 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             }
 
+            if sync.isSignedIn {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text("This Mac")
+                            .font(Typography.ui(Typography.base, weight: .medium))
+                            .foregroundStyle(p.foreground.color)
+                        Spacer(minLength: 0)
+                        HStack(spacing: 3) {
+                            ForEach(TabSyncRole.allCases) { role in
+                                let active = role == sync.tabRole
+                                Button { sync.setTabRole(role) } label: {
+                                    Text(role.label)
+                                        .font(Typography.ui(Typography.label))
+                                        .foregroundStyle(active ? p.foreground.color : p.mutedForeground.color)
+                                        .padding(.horizontal, 12)
+                                        .frame(height: 26)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                                                .fill(active ? p.background.color : .clear))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                                                .strokeBorder(active ? p.border.color.opacity(0.7) : .clear, lineWidth: 1))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(3)
+                        .background(RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                            .fill(p.input.color.opacity(0.5)))
+                    }
+                    Text(sync.tabRole == .primary
+                         ? "Your open tabs and Spaces are shared to your other Macs. Choose one Mac as Primary."
+                         : "This Mac mirrors your Primary Mac's tabs and Spaces. Its own tabs stay local. Settings, bookmarks and history sync both ways.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                }
+            }
+
             if let msg = sync.statusMessage {
                 Text(msg).font(Typography.ui(Typography.label)).foregroundStyle(p.mutedForeground.color)
             }

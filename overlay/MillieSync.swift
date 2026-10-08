@@ -23,6 +23,19 @@ final class MillieSync: ObservableObject {
     @Published var codeSent = false
     @Published var statusMessage: String?
 
+    /// Which Mac owns the open tabs. The PRIMARY pushes its tabs and Spaces and
+    /// ignores everyone else's; a FOLLOWER mirrors the primary's tabs (skipping
+    /// blanks and URLs it already has) and never pushes tabs back. Settings,
+    /// bookmarks and history sync both ways regardless of role.
+    @Published private(set) var tabRole: TabSyncRole =
+        TabSyncRole(rawValue: UserDefaults.standard.string(forKey: "millie.sync.tabRole") ?? "") ?? .follower
+    func setTabRole(_ role: TabSyncRole) {
+        guard role != tabRole else { return }
+        tabRole = role
+        UserDefaults.standard.set(role.rawValue, forKey: "millie.sync.tabRole")
+        if isSignedIn { schedulePush(); Task { await pull() } }
+    }
+
     // Config — same project as the iOS app.
     private let baseURL = URL(string: "https://tyvqnxqlwghndtymjazm.supabase.co")!
     private let anonKey = "sb_publishable_uZXk6eovZ5SWzTKb46oP6w_I7WEp7-W"
@@ -192,9 +205,12 @@ final class MillieSync: ObservableObject {
         let archive = ArchiveStore.shared.tabs.map(ArchiveRow.init)
         NSLog("MILLIE_SYNC push profiles=%d spaces=%d tabs=%d", profiles.count, spaces.count, tabs.count)
 
-        await upsert("millie_profiles", profiles)
-        await upsert("millie_spaces", spaces)
-        await upsert("millie_tabs", tabs)
+        let ownsTabs = tabRole == .primary
+        if ownsTabs {
+            await upsert("millie_profiles", profiles)
+            await upsert("millie_spaces", spaces)
+            await upsert("millie_tabs", tabs)
+        }
         await upsert("millie_bookmarks", bookmarks)
         await upsert("millie_history", history)
         await upsert("millie_archive", archive)
@@ -209,6 +225,8 @@ final class MillieSync: ObservableObject {
         // for a pinned tab, keep wins over a remote close.
         let pinnedIDs = Set(publicContexts.flatMap { $0.pinnedTabIDs })
             .subtracting(privateTabIDs)
+        // A follower never writes tab/Space state (or tombstones) to the cloud.
+        guard ownsTabs else { _ = browser.drainTombstones(); return }
         for id in pinnedIDs {
             try? await patch("millie_tabs", id: id, body: ["deleted": false])
         }
@@ -233,9 +251,11 @@ final class MillieSync: ObservableObject {
         if let data = try? Data(contentsOf: file),
            let session = try? JSONDecoder().decode(SessionFile.self, from: data),
            !session.tabs.isEmpty {
-            return session.tabs.map { TabSyncRow($0, spaceID: spaceForTab[$0.id]) }
+            return session.tabs.filter { !Self.isBlankTabURL($0.url) }
+                .map { TabSyncRow($0, spaceID: spaceForTab[$0.id]) }
         }
-        return (browser?.tabs ?? []).map { TabSyncRow($0, spaceID: spaceForTab[$0.id]) }
+        return (browser?.tabs ?? []).filter { !Self.isBlankTabURL($0.urlString) }
+            .map { TabSyncRow($0, spaceID: spaceForTab[$0.id]) }
     }
 
     private func pull() async {
@@ -280,9 +300,10 @@ final class MillieSync: ObservableObject {
         // Structural merge: Spaces, tabs, Profiles (two-way). Remote tabs land as
         // sleeping tabs — the running Chromium session is untouched until one is
         // selected. Guard suppresses the echo push the merge would otherwise fire.
-        guard let browser else { return }
+        guard let browser, tabRole == .follower else { return }
         let rSpaces: [SpaceRow] = (try? await select("millie_spaces")) ?? []
-        let rTabs: [TabSyncRow] = (try? await select("millie_tabs")) ?? []
+        let allRemoteTabs: [TabSyncRow] = (try? await select("millie_tabs")) ?? []
+        let (rTabs, skippedTabIDs) = filterRemoteTabs(allRemoteTabs, spaces: rSpaces, browser: browser)
         let rProfiles: [ProfileRow] = (try? await select("millie_profiles")) ?? []
         guard !rSpaces.isEmpty || !rTabs.isEmpty else { return }
 
@@ -291,9 +312,12 @@ final class MillieSync: ObservableObject {
                          : BrowserProfile(id: r.id, name: r.name, symbol: r.symbol)
         }
         let spaces = rSpaces.sorted { $0.order_index < $1.order_index }.map { r in
-            BrowserContext(id: r.id, name: r.name, symbol: r.symbol, theme: r.theme,
-                           tabIDs: r.tab_ids, pinnedTabIDs: r.pinned_tab_ids,
-                           folders: r.folders, selectedTabID: r.selected_tab_id,
+            var folders = r.folders
+            for i in folders.indices { folders[i].tabIDs.removeAll { skippedTabIDs.contains($0) } }
+            return BrowserContext(id: r.id, name: r.name, symbol: r.symbol, theme: r.theme,
+                           tabIDs: r.tab_ids.filter { !skippedTabIDs.contains($0) },
+                           pinnedTabIDs: r.pinned_tab_ids.filter { !skippedTabIDs.contains($0) },
+                           folders: folders, selectedTabID: r.selected_tab_id.flatMap { skippedTabIDs.contains($0) ? nil : $0 },
                            profileID: r.profile_id)
         }
         let tabs = rTabs.map { r in
@@ -716,5 +740,64 @@ extension MillieSync {
         applyingRemote = false
         storeLastPushed(last)
         if let newest = rows.last?.updated_at { d.set(newest, forKey: SK.lastPull) }
+    }
+}
+
+
+// MARK: - Tab sync role + filtering
+
+enum TabSyncRole: String, CaseIterable, Identifiable {
+    case primary, follower
+    var id: String { rawValue }
+    var label: String { self == .primary ? "Primary" : "Follower" }
+}
+
+extension MillieSync {
+    /// New-tab / blank pages carry no content and just pile up across Macs.
+    nonisolated static func isBlankTabURL(_ url: String) -> Bool {
+        let u = url.trimmingCharacters(in: .whitespaces).lowercased()
+        return u.isEmpty || u == "about:blank"
+            || u.hasPrefix("millie://newtab") || u.hasPrefix("mori://newtab")
+            || u.hasPrefix("chrome://newtab")
+    }
+
+    nonisolated static func normalizedTabURL(_ url: String) -> String {
+        var u = url.lowercased()
+        if let hash = u.firstIndex(of: "#") { u = String(u[..<hash]) }
+        while u.hasSuffix("/") { u.removeLast() }
+        return u
+    }
+
+    /// Followers: drop blank remote tabs and tabs whose URL this Mac already
+    /// has (or that repeat within the remote set). Remote-pinned tabs are always
+    /// kept — a pin is an intentional keep. Returns the kept tabs and the ids
+    /// that were dropped (so Space membership can be scrubbed).
+    fileprivate func filterRemoteTabs(_ remote: [TabSyncRow], spaces: [SpaceRow],
+                                      browser: BrowserStore) -> ([TabSyncRow], Set<UUID>) {
+        var localIDs = Set(browser.tabs.map(\.id))
+        var localURLs = Set(browser.tabs.map { Self.normalizedTabURL($0.urlString) })
+        let file = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MoriBrowser/session.json")
+        if let data = try? Data(contentsOf: file),
+           let session = try? JSONDecoder().decode(SessionFile.self, from: data) {
+            for t in session.tabs {
+                localIDs.insert(t.id)
+                localURLs.insert(Self.normalizedTabURL(t.url))
+            }
+        }
+        let remotePinned = Set(spaces.flatMap { $0.pinned_tab_ids })
+        var kept: [TabSyncRow] = [], skipped = Set<UUID>(), seen = Set<String>()
+        for t in remote {
+            if Self.isBlankTabURL(t.url) { skipped.insert(t.id); continue }
+            if localIDs.contains(t.id) { kept.append(t); continue }   // already ours
+            let key = Self.normalizedTabURL(t.url)
+            if !remotePinned.contains(t.id), localURLs.contains(key) || seen.contains(key) {
+                skipped.insert(t.id); continue
+            }
+            seen.insert(key)
+            kept.append(t)
+        }
+        return (kept, skipped)
     }
 }
