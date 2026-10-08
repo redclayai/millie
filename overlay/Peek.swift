@@ -159,8 +159,11 @@ struct PeekOverlay: View {
                     .onTapGesture { store.closePeek() }
                     .transition(.opacity)
 
+                // Fade only. A scale transition can stall at 0.96 (SwiftUI hosted in
+                // Chromium) and leave the web page rasterized at a fractional
+                // scale — soft, blurry text.
                 PeekCard(store: store, tab: tab)
-                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    .transition(.opacity)
             }
         }
         .animation(Motion.snappy, value: store.peekTab != nil)
@@ -178,8 +181,13 @@ private struct PeekCard: View {
             // Arc-style: a large floating card that nearly fills the window,
             // with a consistent margin. The controls sit ABOVE the card (not
             // over the page) so they never collide with the site's own chrome.
-            let width = min(geo.size.width - 120, 1500)
-            let height = min(geo.size.height - 130, 1120)
+            // Snap size and origin to whole points so the web view never lands
+            // on a half-pixel (which blurs text).
+            let width = (min(geo.size.width - 120, 1500) / 2).rounded(.down) * 2
+            let height = (min(geo.size.height - 130, 1120) / 2).rounded(.down) * 2
+            let stackHeight = 28 + 8 + height
+            let originX = ((geo.size.width - width) / 2).rounded(.down)
+            let originY = ((geo.size.height - stackHeight) / 2).rounded(.down)
             VStack(alignment: .trailing, spacing: 8) {
                 controls
                     .frame(width: width, alignment: .trailing)
@@ -194,7 +202,9 @@ private struct PeekCard: View {
                             .strokeBorder(p.border.color.opacity(0.7), lineWidth: 1))
                     .elevation(.overlay, scheme)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.leading, originX)
+            .padding(.top, originY)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
     }
 
