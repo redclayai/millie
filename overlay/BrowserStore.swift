@@ -1032,6 +1032,29 @@ final class BrowserStore: ObservableObject {
         selectTab(id)
     }
 
+    /// Sync can leave two pins for the same page in one Space (a follower that
+    /// already had a pin plus the primary's copy). Keep the first pin per URL in
+    /// each Space and remove the rest. Blank / internal pages are never deduped.
+    @discardableResult
+    func dedupePinnedTabsByURL() -> Int {
+        var removed = 0
+        for ctx in contexts where !ctx.isPrivate {
+            var seen = Set<String>()
+            var dupes: [BrowserTab.ID] = []
+            for id in ctx.pinnedTabIDs {
+                guard let t = tab(for: id) else { continue }
+                let key = MillieSync.normalizedTabURL(t.urlString)
+                if MillieSync.isBlankTabURL(t.urlString) { continue }
+                if !seen.insert(key).inserted { dupes.append(id) }
+            }
+            for id in dupes where id != selectedTabID {
+                closeTab(id, allowPinned: true, forceRemove: true)
+                removed += 1
+            }
+        }
+        return removed
+    }
+
     func closeTab(_ id: BrowserTab.ID,
                   allowPinned: Bool = false,
                   allowFolderRemoval: Bool = false,

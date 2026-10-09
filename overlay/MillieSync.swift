@@ -333,6 +333,7 @@ final class MillieSync: ObservableObject {
         browser.applyRemoteSync(profiles: profiles, spaces: spaces, tabs: tabs,
                                 deletedTabIDs: Set(delTabs.map(\.id)),
                                 deletedSpaceIDs: Set(delSpaces.map(\.id)))
+        browser.dedupePinnedTabsByURL()
         applyingRemote = false
     }
 
@@ -786,13 +787,14 @@ extension MillieSync {
                 localURLs.insert(Self.normalizedTabURL(t.url))
             }
         }
-        let remotePinned = Set(spaces.flatMap { $0.pinned_tab_ids })
         var kept: [TabSyncRow] = [], skipped = Set<UUID>(), seen = Set<String>()
         for t in remote {
             if Self.isBlankTabURL(t.url) { skipped.insert(t.id); continue }
             if localIDs.contains(t.id) { kept.append(t); continue }   // already ours
             let key = Self.normalizedTabURL(t.url)
-            if !remotePinned.contains(t.id), localURLs.contains(key) || seen.contains(key) {
+            // Pins dedupe by URL too: a follower that already has the page (pinned
+            // or not) must not grow a second copy of the primary's pin.
+            if localURLs.contains(key) || seen.contains(key) {
                 skipped.insert(t.id); continue
             }
             seen.insert(key)
