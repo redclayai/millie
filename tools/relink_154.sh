@@ -4,6 +4,11 @@ set -euo pipefail
 cd ~/mori-browser-build/build/src/out/Default
 export PATH="$HOME/mori-browser-build/buildpy/bin:/opt/homebrew/bin:$PATH" DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer VPYTHON_BYPASS=x
 ln -sfn /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk sdk/xcode_links/MacOSX26.0.sdk
+# Recompile the Swift overlay first (command regenerated each run; fail loudly).
+rsync -a ~/mori-browser-build/millie/overlay/ ../../chrome/browser/ui/mori/
+ninja -t commands -s obj/chrome/browser/ui/mori_ui_swift/chrome_browser_ui_mori_ui_swift.swiftmodule > ~/mori-browser-build/swift154.cmd
+[ -s ~/mori-browser-build/swift154.cmd ] || { echo "FATAL: no swift compile command"; exit 1; }
+bash ~/mori-browser-build/swift154.cmd > ~/mori-browser-build/swift154.log 2>&1 || { echo "FATAL: swift compile failed"; grep -E "error" ~/mori-browser-build/swift154.log | head; exit 1; }
 python3 - <<'PY'
 import re,shlex
 lines=open('obj/chrome/chrome_framework_shared_library.ninja').read().split('\n')
