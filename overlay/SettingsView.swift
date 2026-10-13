@@ -572,9 +572,21 @@ struct SettingsView: View {
                         .background(RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
                             .fill(p.input.color.opacity(0.5)))
                     }
+                    if sync.tabRole == .follower {
+                        Button { sync.resyncTabsFromPrimary() } label: {
+                            HStack(spacing: 6) {
+                                Icon(name: "arrow.clockwise", size: 12)
+                                Text(sync.isResyncing ? "Resyncing…" : "Resync tabs from Primary")
+                                    .font(Typography.ui(Typography.base, weight: .medium))
+                            }
+                            .foregroundStyle(p.primary.color)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(sync.isResyncing)
+                    }
                     Text(sync.tabRole == .primary
                          ? "Your open tabs and Spaces are shared to your other Macs. Choose one Mac as Primary."
-                         : "This Mac mirrors your Primary Mac's tabs and Spaces. Its own tabs stay local. Settings, bookmarks and history sync both ways.")
+                         : "Tabs you close here stay closed. Press Resync to bring back your Primary Mac's tabs; tabs you opened on this Mac are kept. Settings, bookmarks and history still sync both ways.")
                         .font(Typography.ui(Typography.label))
                         .foregroundStyle(p.mutedForeground.color)
                 }

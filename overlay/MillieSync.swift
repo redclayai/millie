@@ -29,11 +29,28 @@ final class MillieSync: ObservableObject {
     /// bookmarks and history sync both ways regardless of role.
     @Published private(set) var tabRole: TabSyncRole =
         TabSyncRole(rawValue: UserDefaults.standard.string(forKey: "millie.sync.tabRole") ?? "") ?? .follower
+    /// Set by `resyncTabsFromPrimary()`; consumed by the next pull.
+    private var resyncRequested = false
+    @Published private(set) var isResyncing = false
+
+    /// Follower only: bring the Primary's tabs and Spaces back (anything closed
+    /// here returns) while keeping every tab created on this Mac.
+    func resyncTabsFromPrimary() {
+        guard isSignedIn, tabRole == .follower, !isResyncing else { return }
+        isResyncing = true
+        resyncRequested = true
+        Task {
+            await pull()
+            isResyncing = false
+            statusMessage = "Tabs resynced from your Primary Mac."
+        }
+    }
+
     func setTabRole(_ role: TabSyncRole) {
         guard role != tabRole else { return }
         tabRole = role
         UserDefaults.standard.set(role.rawValue, forKey: "millie.sync.tabRole")
-        if isSignedIn { schedulePush(); Task { await pull() } }
+        if isSignedIn { schedulePush() }
     }
 
     // Config — same project as the iOS app.
@@ -300,7 +317,10 @@ final class MillieSync: ObservableObject {
         // Structural merge: Spaces, tabs, Profiles (two-way). Remote tabs land as
         // sleeping tabs — the running Chromium session is untouched until one is
         // selected. Guard suppresses the echo push the merge would otherwise fire.
-        guard let browser, tabRole == .follower else { return }
+        // A Follower never merges the Primary's tabs on its own: tabs it closes
+        // stay closed. They come back only when the user presses "Resync tabs".
+        guard let browser, tabRole == .follower, resyncRequested else { return }
+        resyncRequested = false
         let rSpaces: [SpaceRow] = (try? await select("millie_spaces")) ?? []
         let allRemoteTabs: [TabSyncRow] = (try? await select("millie_tabs")) ?? []
         let (rTabs, skippedTabIDs) = filterRemoteTabs(allRemoteTabs, spaces: rSpaces, browser: browser)
