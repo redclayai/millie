@@ -95,7 +95,7 @@ extension BrowserStore {
     /// page reloads, which is an acceptable trade for it actually showing.
     func promotePeek() {
         guard let tab = peekTab else { return }
-        let url = promotableURL(for: tab)
+        guard let url = promotableURL(for: tab) else { warnPeekNotReady(); return }
         closePeek()
         focusPromotedTab(newTab(url: url, select: true))
     }
@@ -105,7 +105,7 @@ extension BrowserStore {
     func promotePeekToSplit() {
         guard let tab = peekTab else { return }
         let previous = selectedTabID
-        let url = promotableURL(for: tab)
+        guard let url = promotableURL(for: tab) else { warnPeekNotReady(); return }
         closePeek()
         let promoted = newTab(url: url, select: true)
         if let previous, previous != promoted.id {
@@ -136,11 +136,24 @@ extension BrowserStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: nudge)
     }
 
-    /// The URL to open when promoting a Peek — nil (new-tab page) if the peek
-    /// never navigated past about:blank.
+    /// The URL to open when promoting a Peek. Prefers the web view's LIVE address
+    /// over the tab's cached `urlString`, which can still be empty / about:blank
+    /// when a panel or PiP window changes event timing. nil only if the peek has
+    /// genuinely not navigated anywhere yet.
     private func promotableURL(for tab: BrowserTab) -> String? {
-        let u = tab.urlString
-        return (u.isEmpty || u == "about:blank") ? nil : u
+        func usable(_ u: String?) -> String? {
+            guard let u, !u.isEmpty, u != "about:blank" else { return nil }
+            return u
+        }
+        if tab.hasRealized, let live = usable(tab.browserView.currentURL) { return live }
+        return usable(tab.urlString)
+    }
+
+    /// Promotion with nowhere to go would just open a blank tab — keep the peek
+    /// open instead and say why.
+    private func warnPeekNotReady() {
+        ToastCenter.shared.show("Page is still loading — try again in a moment",
+                                icon: "eye", style: .warning)
     }
 }
 
