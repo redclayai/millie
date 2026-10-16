@@ -2592,6 +2592,21 @@ Browser* ActiveBrowser() {
   return NSPointInRect(localPoint, self.bounds);
 }
 
+- (NSString*)liveURL {
+  if (!_webContents) {
+    return @"";
+  }
+  GURL url = _webContents->GetVisibleURL();
+  if (!url.is_valid() || url.is_empty() || url.spec() == "about:blank") {
+    const GURL& committed = _webContents->GetLastCommittedURL();
+    if (committed.is_valid() && !committed.is_empty() &&
+        committed.spec() != "about:blank") {
+      url = committed;
+    }
+  }
+  return url.is_valid() ? base::SysUTF8ToNSString(url.spec()) : @"";
+}
+
 - (void)focusBrowser {
   if (!_webContents || !g_mori_browser) {
     return;

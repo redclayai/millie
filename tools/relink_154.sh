@@ -3,7 +3,12 @@
 set -euo pipefail
 cd ~/mori-browser-build/build/src/out/Default
 export PATH="$HOME/mori-browser-build/buildpy/bin:/opt/homebrew/bin:$PATH" DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer VPYTHON_BYPASS=x
-ln -sfn /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk sdk/xcode_links/MacOSX26.0.sdk
+# Xcode updates delete the root-owned MacOSX26.0.sdk link; fall back to the CLT copy
+# (same SDK, no arm64e.x1 TAPI tokens). Fine for compile/link-only runs.
+mkdir -p sdk/xcode_links
+XSDK=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk
+[ -e "$XSDK" ] || XSDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.0.sdk
+ln -sfn "$XSDK" sdk/xcode_links/MacOSX26.0.sdk
 # Recompile the Swift overlay first (command regenerated each run; fail loudly).
 rsync -a ~/mori-browser-build/millie/overlay/ ../../chrome/browser/ui/mori/
 ninja -t commands -s obj/chrome/browser/ui/mori_ui_swift/chrome_browser_ui_mori_ui_swift.swiftmodule > ~/mori-browser-build/swift154.cmd

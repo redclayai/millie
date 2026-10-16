@@ -72,6 +72,10 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 
 /// Live state, kept in sync for convenience (also pushed via the delegate).
 @property(nonatomic, copy, readonly) NSString *currentURL;
+/// The page's address as Chromium itself reports it (visible URL, else last
+/// committed) — independent of whether our navigation callbacks ever fired.
+/// Empty string if the page has no address yet.
+- (NSString *)liveURL;
 @property(nonatomic, copy, readonly) NSString *currentTitle;
 @property(nonatomic, readonly) BOOL isLoading;
 @property(nonatomic, readonly) BOOL canGoBack;

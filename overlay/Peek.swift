@@ -145,7 +145,11 @@ extension BrowserStore {
             guard let u, !u.isEmpty, u != "about:blank" else { return nil }
             return u
         }
-        if tab.hasRealized, let live = usable(tab.browserView.currentURL) { return live }
+        if tab.hasRealized {
+            let view = tab.browserView
+            if let live = usable(view.liveURL()) { return live }
+            if let live = usable(view.currentURL) { return live }
+        }
         return usable(tab.urlString)
     }
 
