@@ -10,6 +10,12 @@ Apple Silicon · macOS 14 Sonoma or later. Signed & notarized by Red Clay AI, In
 
 ![Millie](docs/screenshots/hero.png)
 
+
+
+https://github.com/user-attachments/assets/fe9b30d7-ef4f-4c04-aeca-f21b305cf4c6
+
+
+
 ---
 
 ## Organize the way you think
