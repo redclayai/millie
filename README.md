@@ -42,7 +42,7 @@ https://github.com/user-attachments/assets/fe9b30d7-ef4f-4c04-aeca-f21b305cf4c6
 
 ## Private by default
 
-- Built on **ungoogled-chromium** — Google's account hooks and background phone-home are stripped out.
+- Built on Google Chromium
 - Built-in ad blocking.
 - Per-profile isolation keeps your worlds apart.
 
