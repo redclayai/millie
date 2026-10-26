@@ -84,7 +84,8 @@ struct Omnibox: View {
     }
 
     var body: some View {
-        HStack(spacing: 7) {
+        VStack(spacing: 6) {
+          HStack(spacing: 7) {
             // The URL display doubles as the launch target. Extension items stay
             // outside the button so they remain independently clickable.
             Button(action: { store.presentLauncherForCurrentTab() }) {
@@ -98,7 +99,7 @@ struct Omnibox: View {
                     } else {
                         Text(displayText)
                             .font(Typography.ui(Typography.base))
-                            .foregroundStyle(p.foreground.color.opacity(0.78))
+                            .foregroundStyle(p.foreground.color)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
@@ -108,13 +109,26 @@ struct Omnibox: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .help(tab.displayURL.isEmpty ? "Search or enter address (⌘L)" : tab.displayURL)
+            .accessibilityLabel(tab.displayURL.isEmpty ? "Search or enter address" : "Address: \(tab.displayURL)")
+            .accessibilityHint("Opens the full address for editing")
+          }
+          .padding(.horizontal, 11)
+          .frame(height: 36)
+          .background {
+              Color.clear.liquidGlass(cornerRadius: Radius.button)
+          }
+          .overlay(RoundedRectangle(cornerRadius: Radius.button)
+              .strokeBorder(p.border.color.opacity(0.35), lineWidth: 1))
 
+          HStack(spacing: 7) {
             if let id = ExtensionStore.webStoreExtensionID(from: tab.urlString) {
                 AddExtensionButton(installing: extensions.installingIDs.contains(id)) {
                     extensions.beginWebStoreInstall(extensionID: id)
                 }
             }
 
+            Spacer(minLength: 0)
             ExtensionToolbarItems(store: store)
 
             ReaderButton(store: store, tab: tab)
@@ -125,15 +139,9 @@ struct Omnibox: View {
                 ProgressView().controlSize(.small).scaleEffect(0.55)
             }
         }
-        .padding(.horizontal, 11)
-        .frame(height: 36)
-        .background {
-            Color.clear.liquidGlass(cornerRadius: Radius.button)
+          .padding(.horizontal, 7)
+          .frame(height: 24)
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.button, style: .continuous)
-                .strokeBorder(p.border.color.opacity(0.35), lineWidth: 1)
-        )
     }
 
     @ViewBuilder private var leadingIcon: some View {

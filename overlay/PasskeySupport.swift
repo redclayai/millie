@@ -83,10 +83,7 @@ final class CredentialStore {
     private var records: [CredentialRecord]
 
     init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let dir = base.appendingPathComponent("MoriBrowser", isDirectory: true)
+        let dir = BrowserSettings.dataDirectory
         try? FileManager.default.createDirectory(at: dir,
                                                  withIntermediateDirectories: true)
         url = dir.appendingPathComponent("passkeys.json")

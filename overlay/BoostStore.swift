@@ -30,9 +30,7 @@ final class BoostStore: ObservableObject {
 
     init() {
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fm.temporaryDirectory
-        let dir = base.appendingPathComponent("MoriBrowser", isDirectory: true)
+        let dir = BrowserSettings.dataDirectory
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         fileURL = dir.appendingPathComponent("boosts.json")
         load()

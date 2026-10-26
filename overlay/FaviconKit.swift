@@ -18,10 +18,7 @@ final class FaviconCache {
     private var inFlight = Set<String>()      // hosts with a fetch running (main-actor guarded)
 
     private lazy var dir: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let d = base.appendingPathComponent("MoriBrowser", isDirectory: true)
+        let d = BrowserSettings.dataDirectory
                     .appendingPathComponent("FaviconCache", isDirectory: true)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d

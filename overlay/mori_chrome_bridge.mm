@@ -65,11 +65,15 @@
 // headless Browser (own cookies/cache/storage). See CONTEXT_ISOLATION_DESIGN.md.
 #include <map>
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/sessions/session_restore.h"
 #include "chrome/browser/lifetime/browser_shutdown.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "content/public/browser/web_contents.h"
+#include "chrome/browser/performance_manager/policies/discard_eligibility_policy.h"
+#include "chrome/browser/performance_manager/policies/page_discarding_helper.h"
+#include "components/performance_manager/public/performance_manager.h"
 #include "content/public/common/referrer.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/download_manager.h"
@@ -103,6 +107,7 @@
                            modifierMask:(NSUInteger)modifierMask;
 + (void)newTab;
 + (void)openNewTabWithURL:(NSString*)url;
++ (BOOL)ownsRestoredTabWithURL:(NSString*)url profileKey:(NSString*)profileKey;
 + (void)openExternalSchemeWithURL:(NSString*)url;
 + (void)newWindow;
 + (void)newPrivateWindow;
@@ -801,6 +806,7 @@ static NSMutableArray<MoriMenuEnabler*>* MoriMenuEnablers() {
 // Engine-facing surface of MoriBrowserView (called from the C++ observers).
 @interface MoriBrowserView ()
 - (void)engineAttachWebContents:(content::WebContents*)webContents;
+- (void)engineReplaceWebContents:(content::WebContents*)webContents;
 - (void)engineWebContentsGone;
 - (void)engineSetTitle:(NSString*)title;
 - (void)engineSetURL:(NSString*)url;
@@ -865,6 +871,7 @@ class TabBridge : public content::WebContentsObserver,
   }
 
   void PrimaryPageChanged(content::Page& page) override {
+    [view_ engineSetTitle:base::SysUTF16ToNSString(web_contents()->GetTitle())];
     [view_ engineSetURL:base::SysUTF8ToNSString(
                              web_contents()->GetLastCommittedURL().spec())];
     [view_ engineNavStateChanged];
@@ -888,6 +895,8 @@ class TabBridge : public content::WebContentsObserver,
   }
 
   void DidStopLoading() override {
+    // Back/forward-cache restores need not emit TitleWasSet.
+    [view_ engineSetTitle:base::SysUTF16ToNSString(web_contents()->GetTitle())];
     [view_ engineSetLoading:NO];
     [view_ engineNavStateChanged];
     [view_ engineMaybeRefocus];
@@ -964,6 +973,15 @@ class MoriTabStripBridge : public TabStripModelObserver {
       TabStripModel* tab_strip_model,
       const TabStripModelChange& change,
       const TabStripSelectionChange& selection) override {
+    if (change.type() == TabStripModelChange::kReplaced) {
+      const auto* replacement = change.GetReplace();
+      auto it = ViewMap().find(replacement->old_contents);
+      if (it != ViewMap().end()) {
+        MoriBrowserView* view = it->second;
+        [view engineReplaceWebContents:replacement->new_contents];
+      }
+      return;
+    }
     if (change.type() != TabStripModelChange::kInserted) {
       return;
     }
@@ -1011,7 +1029,8 @@ class MoriTabStripBridge : public TabStripModelObserver {
       const std::string spec = url.is_valid() && !url.spec().empty()
                                    ? url.spec()
                                    : std::string("about:blank");
-      OrphanMap().emplace(spec, OrphanEntry{wc, base::TimeTicks::Now()});
+      // Defer native session restoration until Millie's snapshot is ready,
+      // so partially restored engine contents cannot be adopted prematurely.
       // Defer the Millie-side tab creation to the next runloop tick. We are
       // inside TabStripModel::OnTabStripModelChanged — the strip is mid-insert.
       // openNewTab -> peek()/newTab() realizes a WebContents and synchronously
@@ -1023,10 +1042,58 @@ class MoriTabStripBridge : public TabStripModelObserver {
       // registered synchronously above, so adoption still matches on the next
       // tick. (v2.39 deferred only peek()'s close(); this covers the whole
       // creation path — close, mount, attach, and activate.)
+      Profile* profile = Profile::FromBrowserContext(wc->GetBrowserContext());
+      const auto* entry = wc->GetController().GetLastCommittedEntry();
+      const bool session_restore = SessionRestore::IsRestoring(profile) ||
+                                   (![MoriRoot uiReady] && entry && entry->IsRestored());
+      OrphanMap().emplace(spec, OrphanEntry{wc, base::TimeTicks::Now()});
+      std::string profile_key = "default";
+      if (profile->IsOffTheRecord()) {
+        profile_key = "incognito";
+      } else {
+        const std::string basename = profile->GetPath().BaseName().AsUTF8Unsafe();
+        if (basename.starts_with("Millie-")) { profile_key = basename.substr(7); }
+      }
       base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-          FROM_HERE, base::BindOnce([](std::string s) {
+          FROM_HERE, base::BindOnce([](std::string s, std::string key,
+                                      bool restored,
+                                      base::WeakPtr<content::WebContents> contents) {
+            if (!contents || ViewMap().count(contents.get())) {
+              return;  // Already adopted by a restored Millie tab.
+            }
+            if (restored && [MoriRoot ownsRestoredTabWithURL:base::SysUTF8ToNSString(s)
+                                                   profileKey:base::SysUTF8ToNSString(key)]) {
+              // Keep this contents available for the restored Swift view to
+              // adopt. Closing startup tabs before a view has attached can
+              // destroy Chromium's browser container and strand the UI.
+              base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+                  FROM_HERE, base::BindOnce([](base::WeakPtr<content::WebContents> redundant) {
+                    if (!redundant || ViewMap().count(redundant.get())) { return; }
+                    Profile* p = Profile::FromBrowserContext(redundant->GetBrowserContext());
+                    if (SessionRestore::IsRestoring(p)) { return; }
+                    bool attached = false;
+                    for (const auto& item : ViewMap()) {
+                      if (item.second && item.first->GetBrowserContext() == p) {
+                        attached = true;
+                        break;
+                      }
+                    }
+                    if (!attached) { return; }
+                    Browser* owner = MoriFindBrowserWithTab(redundant.get());
+                    TabStripModel* model = owner ? owner->tab_strip_model() : nullptr;
+                    const int index = model ? model->GetIndexOfWebContents(redundant.get())
+                                            : TabStripModel::kNoTab;
+                    if (index == TabStripModel::kNoTab || model->count() <= 1) { return; }
+                    for (auto it = OrphanMap().begin(); it != OrphanMap().end();) {
+                      if (it->second.contents == redundant.get()) { it = OrphanMap().erase(it); }
+                      else { ++it; }
+                    }
+                    model->CloseWebContentsAt(index, TabCloseTypes::CLOSE_NONE);
+                  }, contents), base::Seconds(2));
+              return;
+            }
             [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(s)];
-          }, spec));
+          }, spec, profile_key, session_restore, wc->GetWeakPtr()));
     }
   }
 
@@ -1894,6 +1961,9 @@ Browser* ActiveBrowser() {
   }
   ViewMap()[webContents] = self;
   _bridge = std::make_unique<mori::TabBridge>(webContents, self);
+  if (webContents->GetController().NeedsReload()) {
+    webContents->GetController().LoadIfNecessary();
+  }
 
   // Ensure Chrome's AutoPictureInPictureTabHelper is attached so conferencing
   // apps (Meet/Zoom/Teams) that register the 'enterpictureinpicture' media
@@ -1923,6 +1993,17 @@ Browser* ActiveBrowser() {
   if (!self.isHidden && _webWindowVisible) {
     [self focusBrowser];
   }
+}
+
+- (void)engineReplaceWebContents:(content::WebContents*)webContents {
+  // Discard/prerender can replace WebContents without closing the logical tab.
+  // Stop observing the old contents before it is destroyed.
+  _bridge.reset();
+  ViewMap().erase(_webContents);
+  [_webView removeFromSuperview];
+  _webView = nil;
+  _webContents = nullptr;
+  [self engineAttachWebContents:webContents];
 }
 
 - (void)engineWebContentsGone {
@@ -3074,6 +3155,40 @@ static NSString* MoriMediaCommandScript(NSString* action, double value) {
   g_web_content_suppressed = suppressed;
   for (MoriBrowserView* view in [AllViews() copy]) {
     [view applySuppressionState];
+  }
+}
+
+- (BOOL)canSafelySuspend {
+  if (!_webContents || _webContents->IsLoading() ||
+      _webContents->IsBeingCaptured() || _webContents->IsCurrentlyAudible() ||
+      _webContents->NeedToFireBeforeUnloadOrUnloadEvents() ||
+      !performance_manager::PerformanceManager::IsAvailable()) {
+    return NO;
+  }
+  auto page = performance_manager::PerformanceManager::GetPrimaryPageNodeForWebContents(_webContents);
+  auto* policy = performance_manager::policies::DiscardEligibilityPolicy::GetFromGraph(
+      performance_manager::PerformanceManager::GetGraph());
+  return page && policy && policy->CanDiscard(
+      page.get(), mojom::LifecycleUnitDiscardReason::PROACTIVE,
+      /*ignore_recent_visibility=*/true) ==
+          performance_manager::policies::CanDiscardResult::kEligible;
+}
+
+- (BOOL)sleepBrowser {
+  if (![self canSafelySuspend]) { return NO; }
+  auto page = performance_manager::PerformanceManager::GetPrimaryPageNodeForWebContents(_webContents);
+  auto* helper = performance_manager::policies::PageDiscardingHelper::GetFromGraph(
+      performance_manager::PerformanceManager::GetGraph());
+  if (!page || !helper) { return NO; }
+  return helper->ImmediatelyDiscardMultiplePages(
+      {page.get()}, mojom::LifecycleUnitDiscardReason::PROACTIVE,
+      /*ignore_recent_visibility=*/true);
+}
+
+- (void)wakeBrowser {
+  if (_webContents) {
+    _webContents->GetController().SetNeedsReload();
+    _webContents->GetController().LoadIfNecessary();
   }
 }
 

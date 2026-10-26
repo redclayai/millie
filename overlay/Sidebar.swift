@@ -376,6 +376,7 @@ private struct PrivateBanner: View {
 // MARK: - Pinned tiles
 
 private struct PinnedGrid: View {
+    @ObservedObject private var settings = BrowserSettings.shared
     @ObservedObject var store: BrowserStore
     @Binding var draggingTabID: BrowserTab.ID?
     @State private var dropTargeted = false
@@ -385,6 +386,7 @@ private struct PinnedGrid: View {
     /// tiles grow and shrink as the sidebar is resized. While empty (a drag is in
     /// progress) a single column keeps the drop hint full-width.
     private var columns: [GridItem] {
+        if settings.pinnedTabLabels { return [GridItem(.flexible())] }
         let count = store.pinnedTabs.isEmpty
             ? 1
             : (store.pinnedTabs.count >= 4 ? 4 : 3)
@@ -434,6 +436,7 @@ private struct PinnedGrid: View {
 }
 
 private struct PinnedTile: View {
+    @ObservedObject private var settings = BrowserSettings.shared
     @ObservedObject var tab: BrowserTab
     let isSelected: Bool
     let onSelect: () -> Void
@@ -444,11 +447,21 @@ private struct PinnedTile: View {
     @State private var pressing = false
 
     var body: some View {
-        Favicon(icon: tab.faviconURL, page: tab.urlString, image: tab.faviconImage,
-                size: 24, active: !tab.isAsleep)
-            .grayscale(tab.isAsleep ? 1 : 0)
-            .opacity(tab.isAsleep ? 0.5 : 1)
-            .frame(height: 48)
+        HStack(spacing: 9) {
+            Favicon(icon: tab.faviconURL, page: tab.urlString, image: tab.faviconImage,
+                    size: settings.pinnedTabLabels ? 18 : 24, active: !tab.isAsleep)
+                .grayscale(tab.isAsleep ? 1 : 0)
+                .opacity(tab.isAsleep ? 0.65 : 1)
+            if settings.pinnedTabLabels {
+                Text(tab.displayTitle)
+                    .font(Typography.ui(Typography.base))
+                    .foregroundStyle(p.sidebarForeground.color)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+        }
+            .padding(.horizontal, settings.pinnedTabLabels ? 10 : 0)
+            .frame(height: settings.pinnedTabLabels ? 38 : 48)
             .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: TabSurface.radius, style: .continuous)
@@ -465,7 +478,16 @@ private struct PinnedTile: View {
                 pressing = isPressing
             }
             .onHover { hovering = $0 }
-            .help(tab.displayTitle)
+            .focusable()
+            .onKeyPress(.return) { onSelect(); return .handled }
+            .onKeyPress(.space) { onSelect(); return .handled }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(tab.displayTitle)
+            .accessibilityValue(tab.isAsleep ? "Pinned, sleeping tab" : "Pinned tab")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .accessibilityAction { onSelect() }
+            .help("\(tab.displayTitle)\n\(tab.urlString)")
     }
 
     private var tileFill: Color {
@@ -1050,6 +1072,7 @@ struct TabMenu: View {
             Button("Sleep Tab") { store.sleepTab(tab.id) }
         }
         Button("Archive Tab") { store.archiveTab(tab.id) }
+            .disabled(tab.profileKey == "incognito")
             .disabled(store.isPinned(tab.id))
         Divider()
         if store.selectedTabID == tab.id {

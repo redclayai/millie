@@ -7,6 +7,8 @@ struct HistoryEntry: Identifiable, Codable {
     var title: String
     var lastVisited: Date
     var visitCount: Int
+    /// Missing on legacy entries, which belong to the Default profile.
+    var profileKey: String? = nil
 }
 
 /// Persistent browsing history. Records main-frame navigations, collapses
@@ -29,10 +31,10 @@ final class HistoryStore: ObservableObject {
 
     /// Record a visit. Ignores blanks and internal pages so the list stays
     /// meaningful. Same-URL revisits bump the count and move to the top.
-    func record(url: String, title: String) {
-        guard isRecordable(url) else { return }
+    func record(url: String, title: String, profileKey: String = "default") {
+        guard profileKey != "incognito", isRecordable(url) else { return }
 
-        if let idx = entries.firstIndex(where: { $0.url == url }) {
+        if let idx = entries.firstIndex(where: { $0.url == url && ($0.profileKey ?? "default") == profileKey }) {
             var updated = entries.remove(at: idx)
             updated.lastVisited = Date()
             updated.visitCount += 1
@@ -40,19 +42,19 @@ final class HistoryStore: ObservableObject {
             entries.insert(updated, at: 0)
         } else {
             let created = HistoryEntry(url: url, title: title,
-                                       lastVisited: Date(), visitCount: 1)
+                                       lastVisited: Date(), visitCount: 1, profileKey: profileKey)
             entries.insert(created, at: 0)
-            if entries.count > maxEntries {
-                entries.removeLast(entries.count - maxEntries)
-            }
+            let idsToTrim = Set(entries.filter { ($0.profileKey ?? "default") == profileKey }
+                .dropFirst(maxEntries).map(\.id))
+            entries.removeAll { idsToTrim.contains($0.id) }
         }
         scheduleSave()
     }
 
     /// Update the title for the most recent entry of a URL (titles arrive after
     /// the navigation commits).
-    func updateTitle(_ title: String, for url: String) {
-        guard !title.isEmpty, let idx = entries.firstIndex(where: { $0.url == url })
+    func updateTitle(_ title: String, for url: String, profileKey: String = "default") {
+        guard profileKey != "incognito", !title.isEmpty, let idx = entries.firstIndex(where: { $0.url == url && ($0.profileKey ?? "default") == profileKey })
         else { return }
         entries[idx].title = title
         scheduleSave()
@@ -60,10 +62,20 @@ final class HistoryStore: ObservableObject {
 
     /// Best prefix/substring matches for omnibox autocomplete, most-visited and
     /// most-recent first.
-    func suggestions(for query: String, limit: Int = 6) -> [HistoryEntry] {
+    func entries(for profileKey: String) -> [HistoryEntry] {
+        guard profileKey != "incognito" else { return [] }
+        return entries.filter { ($0.profileKey ?? "default") == profileKey }
+    }
+
+    func clear(profileKey: String) {
+        entries.removeAll { ($0.profileKey ?? "default") == profileKey }
+        scheduleSave()
+    }
+
+    func suggestions(for query: String, profileKey: String = "default", limit: Int = 6) -> [HistoryEntry] {
         let q = query.lowercased()
         guard !q.isEmpty else { return [] }
-        return entries
+        return entries(for: profileKey)
             .filter { $0.url.lowercased().contains(q) || $0.title.lowercased().contains(q) }
             .sorted { ($0.visitCount, $0.lastVisited) > ($1.visitCount, $1.lastVisited) }
             .prefix(limit)
@@ -93,9 +105,7 @@ final class HistoryStore: ObservableObject {
 
     private static func supportDirectory() -> URL {
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fm.temporaryDirectory
-        let dir = base.appendingPathComponent("MoriBrowser", isDirectory: true)
+        let dir = BrowserSettings.dataDirectory
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }

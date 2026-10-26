@@ -61,7 +61,7 @@ struct TabRow: View {
                 Text(tab.displayTitle)
                     .font(Typography.ui(Typography.base))
                     .foregroundStyle(showsActive ? p.sidebarForeground.color
-                                                 : p.sidebarForeground.color.opacity(tab.isAsleep ? 0.5 : 0.78))
+                                                 : p.sidebarForeground.color.opacity(tab.isAsleep ? 0.8 : 0.95))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -127,6 +127,17 @@ struct TabRow: View {
         .pressShrink(perform: { if !isEditing { onSelect() } }) { isPressing in
             pressing = isPressing
         }
+        .focusable(!isEditing)
+        .onKeyPress(.return) { onSelect(); return .handled }
+        .onKeyPress(.space) { onSelect(); return .handled }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(tab.displayTitle)
+        .accessibilityValue(tab.isAsleep ? "Sleeping tab" : "Tab")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityAction { onSelect() }
+        .accessibilityAction(named: Text("Close tab")) { onClose() }
+        .help("\(tab.displayTitle)\n\(tab.urlString)")
         .onHover { hovering = $0 }
         .onAppear(perform: beginRenameIfRequested)
         .onChange(of: store.tabIDPendingRename) { _, _ in beginRenameIfRequested() }

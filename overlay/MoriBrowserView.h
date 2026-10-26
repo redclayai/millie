@@ -92,6 +92,11 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 - (void)reloadIgnoringCache;
 - (void)stopLoading;
 
+/// Chromium's discard policy protects forms, capture, calls and active pages.
+- (BOOL)canSafelySuspend;
+- (BOOL)sleepBrowser;
+- (void)wakeBrowser;
+
 /// Page zoom. Steps are relative to the browser's current zoom; reset returns
 /// to 100%.
 - (void)zoomIn;

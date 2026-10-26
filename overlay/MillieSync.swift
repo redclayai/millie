@@ -76,6 +76,7 @@ final class MillieSync: ObservableObject {
     /// True while a remote pull is being merged in, so the resulting local
     /// mutations don't bounce straight back out as a push.
     private var applyingRemote = false
+    private var pushing = false
 
     private let defaults = UserDefaults.standard
     private enum K {
@@ -92,6 +93,8 @@ final class MillieSync: ObservableObject {
     /// local changes (to push) and remote changes (to pull).
     func attach(browser: BrowserStore) {
         self.browser = browser
+        // An isolated local test build must never restore real cloud credentials.
+        guard ProcessInfo.processInfo.environment["MILLIE_TEST_DATA_DIR"] == nil else { return }
         // One-time migration: move any plaintext refresh token out of
         // UserDefaults into the Keychain, then scrub the legacy key.
         if Keychain.get(K.refreshAccount) == nil, let legacy = defaults.string(forKey: K.refresh) {
@@ -150,6 +153,13 @@ final class MillieSync: ObservableObject {
         defaults.removeObject(forKey: K.email)
         isSignedIn = false; codeSent = false
         pollTask?.cancel(); pollTask = nil
+        pushItem?.cancel(); pushItem = nil
+    }
+
+    /// Pagination and merge caches belong to an account, not the installation.
+    private func accountKey(_ key: String) -> String {
+        let identity = Data((email ?? "signed-out").lowercased().utf8).base64EncodedString()
+        return "\(key).\(identity)"
     }
 
     private func applySession(_ s: AuthSession) {
@@ -189,7 +199,9 @@ final class MillieSync: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard let self, self.isSignedIn else { continue }
+                guard !Task.isCancelled else { break }
                 await self.pull()
+                await self.flushPendingDeletions()
             }
         }
     }
@@ -203,7 +215,9 @@ final class MillieSync: ObservableObject {
     }
 
     private func pushNow() async {
-        guard isSignedIn, let browser else { return }
+        guard isSignedIn, !pushing, let browser else { return }
+        pushing = true
+        defer { pushing = false }
         // Private (incognito) Spaces and their tabs are never synced.
         let publicContexts = browser.contexts.filter { !$0.isPrivate }
         let privateTabIDs = Set(browser.contexts.filter(\.isPrivate)
@@ -216,9 +230,11 @@ final class MillieSync: ObservableObject {
         let profiles = browser.profiles.map(ProfileRow.init)
         let spaces = publicContexts.enumerated().map { SpaceRow($0.element, order: $0.offset) }
         let tabs = persistedTabRows(spaceForTab: spaceForTab)
-            .filter { !privateTabIDs.contains($0.id) }
+            .filter { $0.profile_key != "incognito" && !privateTabIDs.contains($0.id) }
         let bookmarks = BookmarkStore.shared.bookmarks.map(BookmarkRow.init)
-        let history = HistoryStore.shared.entries.map(HistoryRow.init)
+        // The current cloud schema has no profile identity for history. Only the
+        // Default profile can sync until the server supports profile-scoped rows.
+        let history = HistoryStore.shared.entries(for: "default").map(HistoryRow.init)
         let archive = ArchiveStore.shared.tabs.map(ArchiveRow.init)
         NSLog("MILLIE_SYNC push profiles=%d spaces=%d tabs=%d", profiles.count, spaces.count, tabs.count)
 
@@ -242,8 +258,8 @@ final class MillieSync: ObservableObject {
         // for a pinned tab, keep wins over a remote close.
         let pinnedIDs = Set(publicContexts.flatMap { $0.pinnedTabIDs })
             .subtracting(privateTabIDs)
-        // A follower never writes tab/Space state (or tombstones) to the cloud.
-        guard ownsTabs else { _ = browser.drainTombstones(); return }
+        // Followers retain pending local changes without sending them.
+        guard ownsTabs else { return }
         for id in pinnedIDs {
             try? await patch("millie_tabs", id: id, body: ["deleted": false])
         }
@@ -251,20 +267,36 @@ final class MillieSync: ObservableObject {
         // Propagate local deletions as tombstones (deleted=true) so other devices
         // drop them instead of resurrecting them on the next union merge. Never
         // tombstone a still-pinned tab (pin wins).
-        let (deadTabs, deadSpaces) = browser.drainTombstones()
-        for id in deadTabs where !pinnedIDs.contains(id) {
-            try? await patch("millie_tabs", id: id, body: ["deleted": true])
+        for id in pinnedIDs { browser.acknowledgeTabDeletion(id) }
+        await flushPendingDeletions()
+    }
+
+    private func flushPendingDeletions() async {
+        guard isSignedIn, tabRole == .primary, let browser else { return }
+        let pinned = Set(browser.contexts.filter { !$0.isPrivate }.flatMap(\.pinnedTabIDs))
+        var failed = false
+        for id in browser.pendingTabTombstones {
+            if pinned.contains(id) { browser.acknowledgeTabDeletion(id); continue }
+            do {
+                try await patch("millie_tabs", id: id, body: ["deleted": true])
+                browser.acknowledgeTabDeletion(id)
+            } catch { failed = true }
         }
-        for id in deadSpaces { try? await patch("millie_spaces", id: id, body: ["deleted": true]) }
+        for id in browser.pendingSpaceTombstones {
+            do {
+                try await patch("millie_spaces", id: id, body: ["deleted": true])
+                browser.acknowledgeSpaceDeletion(id)
+            } catch { failed = true }
+        }
+        if failed { statusMessage = "Some changes are waiting to sync. Millie will retry automatically." }
+        else if statusMessage == "Some changes are waiting to sync. Millie will retry automatically." { statusMessage = nil }
     }
 
     /// Tabs for ALL Spaces — sourced from the persisted session (`session.json`),
     /// not just `browser.tabs`, which only holds the realized tabs of the active
     /// Space. Falls back to the realized tabs if the file can't be read.
     private func persistedTabRows(spaceForTab: [UUID: UUID]) -> [TabSyncRow] {
-        let file = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MoriBrowser/session.json")
+        let file = BrowserSettings.dataDirectory.appendingPathComponent("session.json")
         if let data = try? Data(contentsOf: file),
            let session = try? JSONDecoder().decode(SessionFile.self, from: data),
            !session.tabs.isEmpty {
@@ -290,7 +322,7 @@ final class MillieSync: ObservableObject {
         // imports the newest few thousand, later syncs only fetch what changed.
         let historyRows: [HistoryRow] = await pullIncremental("millie_history")
         if !historyRows.isEmpty {
-            let local = Set(HistoryStore.shared.entries.map(\.url))
+            let local = Set(HistoryStore.shared.entries(for: "default").map(\.url))
             for r in historyRows where !local.contains(r.url) {
                 HistoryStore.shared.record(url: r.url, title: r.title)
             }
@@ -564,7 +596,7 @@ extension MillieSync {
     /// sync (capped) and oldest-first afterwards (so the cursor only moves
     /// forward). The cursor is the max `updated_at` seen, kept per table.
     fileprivate func pullIncremental<T: Decodable>(_ table: String) async -> [T] {
-        let cursorKey = "millie.sync.cursor.\(table)"
+        let cursorKey = accountKey("millie.sync.cursor.\(table)")
         let defaults = UserDefaults.standard
         var out: [T] = []
         if let since = defaults.string(forKey: cursorKey) {
@@ -687,12 +719,12 @@ extension MillieSync {
     }
 
     private func lastPushed() -> [String: JSONValue]? {
-        guard let data = UserDefaults.standard.data(forKey: SK.pushed) else { return nil }
+        guard let data = UserDefaults.standard.data(forKey: accountKey(SK.pushed)) else { return nil }
         return try? JSONDecoder().decode([String: JSONValue].self, from: data)
     }
 
     private func storeLastPushed(_ m: [String: JSONValue]) {
-        if let data = try? JSONEncoder().encode(m) { UserDefaults.standard.set(data, forKey: SK.pushed) }
+        if let data = try? JSONEncoder().encode(m) { UserDefaults.standard.set(data, forKey: accountKey(SK.pushed)) }
     }
 
     /// Push only the settings that changed on this Mac since the last push.
@@ -723,7 +755,7 @@ extension MillieSync {
         let d = UserDefaults.standard
         let firstSync = lastPushed() == nil
         var filter = "order=updated_at.asc&limit=1000"
-        if let since = d.string(forKey: SK.lastPull),
+        if let since = d.string(forKey: accountKey(SK.lastPull)),
            let enc = since.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
             filter += "&updated_at=gt.\(enc)"
         }
@@ -760,7 +792,7 @@ extension MillieSync {
         _ = touchedAdblock
         applyingRemote = false
         storeLastPushed(last)
-        if let newest = rows.last?.updated_at { d.set(newest, forKey: SK.lastPull) }
+        if let newest = rows.last?.updated_at { d.set(newest, forKey: accountKey(SK.lastPull)) }
     }
 }
 
@@ -783,10 +815,12 @@ extension MillieSync {
     }
 
     nonisolated static func normalizedTabURL(_ url: String) -> String {
-        var u = url.lowercased()
-        if let hash = u.firstIndex(of: "#") { u = String(u[..<hash]) }
-        while u.hasSuffix("/") { u.removeLast() }
-        return u
+        guard var components = URLComponents(string: url) else { return url }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        // Paths, query values, fragments and trailing slashes can identify
+        // different documents. Normalize only the case-insensitive authority.
+        return components.string ?? url
     }
 
     /// Followers: drop blank remote tabs and tabs whose URL this Mac already
@@ -797,9 +831,7 @@ extension MillieSync {
                                       browser: BrowserStore) -> ([TabSyncRow], Set<UUID>) {
         var localIDs = Set(browser.tabs.map(\.id))
         var localURLs = Set(browser.tabs.map { Self.normalizedTabURL($0.urlString) })
-        let file = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MoriBrowser/session.json")
+        let file = BrowserSettings.dataDirectory.appendingPathComponent("session.json")
         if let data = try? Data(contentsOf: file),
            let session = try? JSONDecoder().decode(SessionFile.self, from: data) {
             for t in session.tabs {

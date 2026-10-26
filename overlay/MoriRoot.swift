@@ -236,6 +236,11 @@ final class MoriRoot: NSObject {
         store.dismissLauncher()
         return true
     }
+    @objc(ownsRestoredTabWithURL:profileKey:)
+    static func ownsRestoredTab(url: String, profileKey: String) -> Bool {
+        shared?.store.ownsRestoredTab(url: url, profileKey: profileKey) ?? false
+    }
+
     @objc(openNewTabWithURL:)
     static func openNewTab(url: String) {
         guard let store = shared?.store else { return }

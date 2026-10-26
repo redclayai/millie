@@ -40,7 +40,10 @@ extension BrowserStore {
     /// tiles (favorites are permanent in Arc) and non-web pages.
     private var archiveProtectedIDs: Set<BrowserTab.ID> {
         var ids = sleepProtectedIDs
-        for context in contexts { ids.formUnion(context.pinnedTabIDs) }
+        for context in contexts {
+            ids.formUnion(context.pinnedTabIDs)
+            if context.isPrivate { ids.formUnion(context.tabIDs) }
+        }
         return ids
     }
 
@@ -69,6 +72,7 @@ extension BrowserStore {
             let doomed = tabs.filter { tab in
                 !protected.contains(tab.id)
                     && Self.isArchivable(tab.urlString)
+                    && tab.canSafelyAutoArchive
                     && tab.lastAccessedAt < archiveCutoff
             }
             for tab in doomed { archiveTab(tab.id) }
@@ -79,8 +83,7 @@ extension BrowserStore {
             for tab in tabs where !protected.contains(tab.id) {
                 guard tab.hasRealized, !tab.isAsleep,
                       tab.lastAccessedAt < sleepCutoff else { continue }
-                tab.sleep()
-                didSleepAny = true
+                if tab.sleep() { didSleepAny = true }
             }
         }
 
@@ -96,7 +99,10 @@ extension BrowserStore {
         guard !sleepProtectedIDs.contains(id),
               let tab = tabs.first(where: { $0.id == id }),
               tab.hasRealized, !tab.isAsleep else { return }
-        tab.sleep()
+        guard tab.sleep() else {
+            ToastCenter.shared.show("This tab is in use or has unfinished work, so it will stay awake.", icon: "sun.max", style: .info)
+            return
+        }
         objectWillChange.send()
         ToastCenter.shared.show("Tab put to sleep", icon: "moon.zzz", style: .success)
     }
@@ -123,8 +129,7 @@ extension BrowserStore {
         var count = 0
         for tab in tabs where !protected.contains(tab.id) {
             guard tab.hasRealized, !tab.isAsleep else { continue }
-            tab.sleep()
-            count += 1
+            if tab.sleep() { count += 1 }
         }
         guard count > 0 else {
             ToastCenter.shared.show("No background tabs to sleep", icon: "moon", style: .warning)
@@ -138,6 +143,7 @@ extension BrowserStore {
     /// Archive a tab: record it to the restorable Archive and close it.
     func archiveTab(_ id: BrowserTab.ID) {
         guard let tab = tabs.first(where: { $0.id == id }),
+              tab.profileKey != "incognito",
               !contexts.contains(where: { $0.pinnedTabIDs.contains(id) })
         else { return }
         ArchiveStore.shared.add(url: tab.urlString,

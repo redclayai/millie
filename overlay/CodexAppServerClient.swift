@@ -624,11 +624,7 @@ final class CodexBrowserAssistant: ObservableObject {
     }
 
     private static func assistantWorkingDirectory() -> String {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let directory = base
-            .appendingPathComponent("MoriBrowser", isDirectory: true)
+        let directory = BrowserSettings.dataDirectory
             .appendingPathComponent("CodexAssistant", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.path

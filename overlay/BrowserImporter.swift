@@ -152,7 +152,7 @@ final class BrowserImporter: ObservableObject {
             for row in rows {
                 guard let url = row["url"] as? String else { continue }
                 let title = row["title"] as? String ?? ""
-                HistoryStore.shared.record(url: url, title: title)
+                HistoryStore.shared.record(url: url, title: title, profileKey: targetProfileKey)
                 res.history += 1
             }
         }

@@ -523,11 +523,7 @@ final class ExtensionStore: ObservableObject {
     }
 
     static func managedDirectory() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base
-            .appendingPathComponent("MoriBrowser", isDirectory: true)
+        return BrowserSettings.dataDirectory
             .appendingPathComponent("Extensions", isDirectory: true)
     }
 }

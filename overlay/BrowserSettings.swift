@@ -22,6 +22,17 @@ struct WebPanel: Identifiable, Codable, Equatable {
 final class BrowserSettings: ObservableObject {
     static let shared = BrowserSettings()
 
+    /// Isolated development data never shares the installed browser's files.
+    /// Production builds use the same Application Support location as before.
+    static var dataDirectory: URL {
+        if let path = ProcessInfo.processInfo.environment["MILLIE_TEST_DATA_DIR"], !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        let fm = FileManager.default
+        return (fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fm.temporaryDirectory).appendingPathComponent("MoriBrowser", isDirectory: true)
+    }
+
     // MARK: General
 
     /// The page opened at launch and by "new tab → homepage".
@@ -43,6 +54,12 @@ final class BrowserSettings: ObservableObject {
     /// Used only when `searchEngine == .custom`. `{query}` is substituted.
     @Published var customSearchTemplate: String {
         didSet { defaults.set(customSearchTemplate, forKey: Key.customEngine) }
+    }
+
+    /// Sends typed search queries to Google for completion, only with consent
+    /// and never in private Spaces. Local history suggestions remain available.
+    @Published var onlineSearchSuggestions: Bool {
+        didSet { defaults.set(onlineSearchSuggestions, forKey: Key.onlineSuggestions) }
     }
 
     // MARK: Privacy
@@ -157,6 +174,10 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(autoSleepMinutes, forKey: Key.autoSleepMinutes) }
     }
 
+    @Published var pinnedTabLabels: Bool {
+        didSet { defaults.set(pinnedTabLabels, forKey: Key.pinnedTabLabels) }
+    }
+
     /// Tinted folder/group cards in the sidebar (accent-colored backgrounds).
     /// Off = plain sidebar, no wash behind groups.
     @Published var tintedFolderCards: Bool {
@@ -253,6 +274,7 @@ final class BrowserSettings: ObservableObject {
     private enum Key {
         static let homepage = "mori.homepageURL"
         static let newTab = "mori.newTabBehavior"
+        static let onlineSuggestions = "millie.onlineSearchSuggestions"
         static let engine = "mori.searchEngine"
         static let customEngine = "mori.customSearchTemplate"
         static let blockAds = "mori.blockAds"
@@ -269,6 +291,7 @@ final class BrowserSettings: ObservableObject {
         static let gradientTheme = "mori.gradientTheme"
         static let autoSleepMinutes = "mori.autoSleepMinutes"
         static let splitRatio = "mori.splitRatio"
+        static let pinnedTabLabels = "millie.pinnedTabLabels"
         static let tintedFolderCards = "mori.tintedFolderCards"
         static let peekPinnedLinks = "mori.peekPinnedLinks"
         static let webPanels = "mori.webPanels"
@@ -297,6 +320,7 @@ final class BrowserSettings: ObservableObject {
             ?? .google
         customSearchTemplate = defaults.string(forKey: Key.customEngine)
             ?? "https://www.example.com/search?q={query}"
+        onlineSearchSuggestions = defaults.object(forKey: Key.onlineSuggestions) as? Bool ?? false
         blockAds = defaults.object(forKey: Key.blockAds) as? Bool ?? true
         safeBrowsingEnabled = defaults.object(forKey: Key.safeBrowsing) as? Bool ?? true
         welcomeSeen = defaults.object(forKey: Key.welcomeSeen) as? Bool ?? false
@@ -321,6 +345,7 @@ final class BrowserSettings: ObservableObject {
         autoPiP = defaults.object(forKey: Key.autoPiP) as? Bool ?? true
         autoSleepMinutes = defaults.object(forKey: Key.autoSleepMinutes) as? Int ?? 20
         splitRatio = defaults.object(forKey: Key.splitRatio) as? Double ?? 0.5
+        pinnedTabLabels = defaults.object(forKey: Key.pinnedTabLabels) as? Bool ?? false
         tintedFolderCards = defaults.object(forKey: Key.tintedFolderCards) as? Bool ?? true
         peekPinnedLinks = defaults.object(forKey: Key.peekPinnedLinks) as? Bool ?? true
         webPanels = (defaults.data(forKey: Key.webPanels))
@@ -347,7 +372,7 @@ final class BrowserSettings: ObservableObject {
          Key.safeBrowsing, Key.aiIntegrationEnabled, Key.sharesPageWithAI,
          Key.theme, Key.sidebarOnLaunch, Key.sidebarPosition, Key.sidebarWidth,
          Key.gradientTheme, Key.autoPiP, Key.autoSleepMinutes, Key.splitRatio,
-         Key.tintedFolderCards, Key.peekPinnedLinks, Key.webPanels,
+         Key.pinnedTabLabels, Key.tintedFolderCards, Key.peekPinnedLinks, Key.webPanels,
          Key.webPanelWidth, Key.autoArchiveHours, Key.tabCycleOrder]
     }
 
@@ -379,6 +404,7 @@ final class BrowserSettings: ObservableObject {
         if let v = d.object(forKey: Key.autoPiP) as? Bool { set(\.autoPiP, v); MoriBrowserView.setAutoPiPEnabled(v) }
         if let v = d.object(forKey: Key.autoSleepMinutes) as? Int { set(\.autoSleepMinutes, v) }
         if let v = d.object(forKey: Key.splitRatio) as? Double { set(\.splitRatio, v) }
+        if let v = d.object(forKey: Key.pinnedTabLabels) as? Bool { set(\.pinnedTabLabels, v) }
         if let v = d.object(forKey: Key.tintedFolderCards) as? Bool { set(\.tintedFolderCards, v) }
         if let v = d.object(forKey: Key.peekPinnedLinks) as? Bool { set(\.peekPinnedLinks, v) }
         if let data = d.data(forKey: Key.webPanels),

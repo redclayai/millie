@@ -230,7 +230,8 @@ private struct LauncherView: View {
     /// (a late response for a stale query is ignored by matching on the trim).
     private var suggestionsForCurrentQuery: [String] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard suggest.activeQuery == trimmed else { return [] }
+        guard store.settings.onlineSearchSuggestions, !store.activeContext.isPrivate,
+              suggest.activeQuery == trimmed else { return [] }
         return suggest.suggestions
     }
 
@@ -278,11 +279,13 @@ private struct LauncherView: View {
         .onChange(of: store.launcherFocusRequest) { _, _ in
             resetForPresentation()
         }
+        .onChange(of: store.activeContextID) { _, _ in suggest.clear() }
+        .onChange(of: store.settings.onlineSearchSuggestions) { _, _ in suggest.clear() }
         .onChange(of: query) { _, text in
             highlighted = 0
             autoActivateOnSpace(text)
             // Fire-and-forget: debounced, cancels in flight, fails silent.
-            if siteSearch == nil {
+            if siteSearch == nil, store.settings.onlineSearchSuggestions, !store.activeContext.isPrivate {
                 suggest.request(for: text)
             } else {
                 suggest.clear()
@@ -1096,10 +1099,10 @@ private struct LauncherItem: Identifiable {
         // "Switch to" it is redundant — skip it.
         let candidateTabs: [BrowserTab] = q.isEmpty
             ? Array(store.tabs
-                .filter { $0.hasRealized }
+                .filter { $0.hasRealized && $0.profileKey == store.activeProfileKey }
                 .sorted { $0.lastAccessedAt > $1.lastAccessedAt }
                 .prefix(4))
-            : store.tabs
+            : store.tabs.filter { $0.profileKey == store.activeProfileKey }
         for tab in candidateTabs {
             if store.launcherEditsCurrentTab, tab.id == store.selectedTabID { continue }
             let match = q.isEmpty
@@ -1121,7 +1124,7 @@ private struct LauncherItem: Identifiable {
         // tabs). Typing brings back best-match suggestions.
         let history = q.isEmpty
             ? []
-            : HistoryStore.shared.suggestions(for: q, limit: 8)
+            : HistoryStore.shared.suggestions(for: q, profileKey: store.activeProfileKey, limit: 8)
         for entry in history {
             guard seen.insert(entry.url).inserted else { continue }
             out.append(LauncherItem(id: "hist-\(entry.id)",

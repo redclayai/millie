@@ -170,7 +170,10 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     @discardableResult
     func realize() -> MoriBrowserView {
         isRealized = true
-        if isAsleep { isAsleep = false }
+        if isAsleep {
+            isAsleep = false
+            _browserView?.wakeBrowser()
+        }
         browserView.setTabPinned(desiredChromePinnedState)
         return browserView
     }
@@ -182,20 +185,35 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
         lastAccessedAt = Date()
     }
 
-    /// Discard the live CEF browser to reclaim memory while keeping the tab in
-    /// the sidebar. Reloads the last URL transparently on next `realize()`.
+    /// Discard an eligible renderer while retaining its Chromium tab and history.
+    /// Wake the existing navigation controller on next `realize()`.
     /// No-op for an unrealized or already-sleeping tab.
-    func sleep() {
-        guard isRealized, let view = _browserView else { return }
-        view.closeBrowser()
+    @discardableResult
+    func sleep() -> Bool {
+        guard isRealized, !isAsleep, let view = _browserView,
+              view.sleepBrowser() else { return false }
+        // Keep the logical Chromium tab and its navigation controller. Discard
+        // releases the renderer while preserving back/forward and page state.
+        isAsleep = true
+        isLoading = false
+        findOrdinal = 0
+        findCount = 0
+        return true
+    }
+
+    var canSafelyAutoArchive: Bool {
+        !isRealized || isAsleep || (_browserView?.canSafelySuspend() ?? false)
+    }
+
+    /// A deliberate profile reassignment requires a fresh storage partition.
+    func resetBrowserForProfileChange() {
+        _browserView?.closeBrowser()
         _browserView = nil
         isRealized = false
         isAsleep = true
         isLoading = false
         canGoBack = false
         canGoForward = false
-        findOrdinal = 0
-        findCount = 0
         isAudible = false
         isMuted = false
     }
@@ -419,7 +437,7 @@ extension BrowserTab: MoriBrowserViewDelegate {
         urlString = url
         // Incognito tabs leave no history.
         if profileKey != "incognito" {
-            HistoryStore.shared.record(url: url, title: title)
+            HistoryStore.shared.record(url: url, title: title, profileKey: profileKey)
         }
         onMetadataChanged?(self)
     }
@@ -427,7 +445,7 @@ extension BrowserTab: MoriBrowserViewDelegate {
     func browserView(_ view: MoriBrowserView, didChangeTitle title: String) {
         self.title = title.isEmpty ? "Untitled" : title
         if profileKey != "incognito" {
-            HistoryStore.shared.updateTitle(self.title, for: urlString)
+            HistoryStore.shared.updateTitle(self.title, for: urlString, profileKey: profileKey)
         }
         onMetadataChanged?(self)
     }

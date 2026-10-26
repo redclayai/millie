@@ -66,6 +66,10 @@ struct LibraryPanel: View {
         .background(p.popover.color)
     }
 
+    private var profileHistory: [HistoryEntry] {
+        history.entries(for: store.activeProfileKey)
+    }
+
     private var footer: some View {
         HStack {
             Button(role: .destructive) { confirmClearAll() } label: {
@@ -130,8 +134,8 @@ struct LibraryPanel: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            if tab == .history && !history.entries.isEmpty {
-                Button { history.clear() } label: {
+            if tab == .history && !profileHistory.isEmpty {
+                Button { history.clear(profileKey: store.activeProfileKey) } label: {
                     Text("Clear")
                         .font(Typography.ui(Typography.label, weight: .medium))
                         .foregroundStyle(p.mutedForeground.color)
@@ -156,19 +160,19 @@ struct LibraryPanel: View {
     private var content: some View {
         switch tab {
         case .history:
-            if history.entries.isEmpty {
-                emptyState("clock", "No history yet")
+            if profileHistory.isEmpty {
+                emptyState("clock", store.activeContext.isPrivate ? "History is not saved in private Spaces" : "No history in this profile yet")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 1) {
-                        ForEach(history.entries.prefix(200)) { entry in
+                        ForEach(profileHistory.prefix(200)) { entry in
                             LibraryRow(title: entry.title, url: entry.url) { open(entry.url) }
                                 .contextMenu {
                                     Button("Remove", role: .destructive) { history.remove(entry) }
                                 }
                         }
-                        if history.entries.count > 200 {
-                            Text("Showing the 200 most recent of \(history.entries.count) entries")
+                        if profileHistory.count > 200 {
+                            Text("Showing the 200 most recent of \(profileHistory.count) entries")
                                 .font(Typography.ui(Typography.small))
                                 .foregroundStyle(p.mutedForeground.color)
                                 .frame(maxWidth: .infinity)

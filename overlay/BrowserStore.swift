@@ -194,6 +194,14 @@ final class BrowserStore: ObservableObject {
     private var closedTabSessions: [ClosedTabSession] = []
     private var notificationObservers: [NSObjectProtocol] = []
     private let sessionFileURL: URL
+    private var sessionRecoveryMessage: String?
+    private var restoredTabURLsByProfile: [String: Set<String>] = [:]
+
+    /// Only the initial snapshot participates; intentional later duplicate tabs
+    /// and ordinary popups must continue to open normally.
+    func ownsRestoredTab(url: String, profileKey: String) -> Bool {
+        restoredTabURLsByProfile[profileKey]?.contains(url) ?? false
+    }
     private var sessionSaveScheduled = false
     private var isRestoringSession = false
     /// Set once the app is quitting. Suppresses debounced session saves so
@@ -233,6 +241,7 @@ final class BrowserStore: ObservableObject {
         /// User opted this tab out of sleeping/archiving ("Keep Awake").
         /// Optional so sessions saved before this field still decode.
         var keepAwake: Bool? = nil
+        var lastAccessedAt: Date? = nil
     }
 
     private struct PersistedSession: Codable {
@@ -287,9 +296,13 @@ final class BrowserStore: ObservableObject {
         // The active Profile's theme drives the chrome while it's active.
         settings.gradientTheme = themeForContext(activeContext)
         isRestoringSession = false
+        if let message = sessionRecoveryMessage {
+            DispatchQueue.main.async {
+                ToastCenter.shared.show(message, icon: "arrow.counterclockwise", style: .warning, duration: 12)
+            }
+        }
 
-        // First run: show the welcome tour once (until dismissed with "Don't
-        // show this again"). Reopenable from Settings.
+        // First run: show the short setup once. Reopenable from Settings.
         if !settings.welcomeSeen { welcomeVisible = true }
 
         // Theme edits made anywhere (sidebar popover, Settings) write
@@ -409,18 +422,20 @@ final class BrowserStore: ObservableObject {
 
     private static func supportDirectory() -> URL {
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fm.temporaryDirectory
-        let dir = base.appendingPathComponent("MoriBrowser", isDirectory: true)
+        let dir = BrowserSettings.dataDirectory
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     @discardableResult
     private func restoreSession() -> Bool {
-        guard let data = try? Data(contentsOf: sessionFileURL),
-              let decoded = try? JSONDecoder().decode(PersistedSession.self, from: data)
-        else { return false }
+        let result = SessionSnapshotStorage.load(PersistedSession.self, from: sessionFileURL)
+        if result.recovered {
+            sessionRecoveryMessage = "Your tabs were recovered from the last good session backup."
+        } else if result.value == nil && result.preservedDamagedFile {
+            sessionRecoveryMessage = "Your previous session couldn't be read. A copy has been kept for recovery."
+        }
+        guard let decoded = result.value else { return false }
 
         // Restore Profiles (ensure Default is always present and first).
         if let persistedProfiles = decoded.profiles, !persistedProfiles.isEmpty {
@@ -441,9 +456,13 @@ final class BrowserStore: ObservableObject {
                 tab.folderHomeURL = persisted.folderHomeURL
                 tab.customTitle = persisted.customTitle
                 tab.keepAwake = persisted.keepAwake ?? false
+                tab.lastAccessedAt = persisted.lastAccessedAt ?? Date()
                 return tab
             }
         guard !restoredTabs.isEmpty else { return false }
+        for tab in restoredTabs where tab.profileKey != "incognito" {
+            restoredTabURLsByProfile[tab.profileKey, default: []].insert(tab.urlString)
+        }
 
         let liveIDs = Set(restoredTabs.map(\.id))
         tabs = restoredTabs
@@ -544,6 +563,7 @@ final class BrowserStore: ObservableObject {
         guard !tabs.isEmpty else { return }
         // Private Spaces (and their tabs) are incognito — never written to disk.
         let privateTabIDs = Set(contexts.filter(\.isPrivate).flatMap(\.tabIDs))
+            .union(tabs.filter { $0.profileKey == "incognito" }.map(\.id))
         let persistableContexts = contexts.filter { !$0.isPrivate }
         let liveIDs = Set(tabs.map(\.id)).subtracting(privateTabIDs)
         var snapshot = persistableContexts.map { context in
@@ -562,15 +582,20 @@ final class BrowserStore: ObservableObject {
             snapshot[idx].selectedTabID = selectedTabID
         }
         let state = PersistedSession(
-            tabs: tabs.filter { !privateTabIDs.contains($0.id) }.map { PersistedTab(id: $0.id, url: $0.urlString, title: $0.title, customTitle: $0.customTitle, profileKey: $0.profileKey, faviconURL: $0.faviconURL, folderHomeURL: $0.folderHomeURL, keepAwake: $0.keepAwake ? true : nil) },
+            tabs: tabs.filter { !privateTabIDs.contains($0.id) }.map { PersistedTab(id: $0.id, url: $0.urlString, title: $0.title, customTitle: $0.customTitle, profileKey: $0.profileKey, faviconURL: $0.faviconURL, folderHomeURL: $0.folderHomeURL, keepAwake: $0.keepAwake ? true : nil, lastAccessedAt: $0.lastAccessedAt) },
             selectedTabID: selectedTabID,
             profiles: profiles,
             contexts: snapshot,
             activeContextID: activeContextID
         )
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        try? data.write(to: sessionFileURL, options: .atomic)
+        do {
+            try SessionSnapshotStorage.save(state, to: sessionFileURL)
+        } catch {
+            NSLog("MILLIE_SESSION save failed: %@", error.localizedDescription)
+            ToastCenter.shared.show("Couldn't save your tabs. Check available disk space.", style: .error)
+        }
     }
+
 
     /// The Profile assigned to a context (Default when unset/unknown).
     func profile(for context: BrowserContext) -> BrowserProfile {
@@ -1175,7 +1200,7 @@ final class BrowserStore: ObservableObject {
         if tab.hasRealized {
             tab.browserView.sendMediaCommand("pause", value: 0)
         }
-        withAnimation(Motion.snappy) { tab.sleep() }
+        withAnimation(Motion.snappy) { _ = tab.sleep() }
         media.forgetTab(browserId: mediaBrowserId)
         scheduleSessionSave()
     }
@@ -2290,15 +2315,19 @@ final class BrowserStore: ObservableObject {
 
     /// Tab/Space ids closed locally that the next push must tombstone in the
     /// cloud (`deleted=true`) so the deletion propagates to other devices
-    /// instead of being resurrected by the union merge. Drained on push.
-    private(set) var pendingTabTombstones: Set<UUID> = []
-    private(set) var pendingSpaceTombstones: Set<UUID> = []
-
-    /// Return and clear the queued tombstones (called by MillieSync on push).
-    func drainTombstones() -> (tabs: [UUID], spaces: [UUID]) {
-        defer { pendingTabTombstones.removeAll(); pendingSpaceTombstones.removeAll() }
-        return (Array(pendingTabTombstones), Array(pendingSpaceTombstones))
+    /// instead of being resurrected by the union merge. Cleared after acknowledgement.
+    private(set) var pendingTabTombstones: Set<UUID> = Set(
+        (UserDefaults.standard.stringArray(forKey: "millie.sync.pendingTabs") ?? []).compactMap(UUID.init(uuidString:))) {
+        didSet { UserDefaults.standard.set(pendingTabTombstones.map(\.uuidString), forKey: "millie.sync.pendingTabs") }
     }
+    private(set) var pendingSpaceTombstones: Set<UUID> = Set(
+        (UserDefaults.standard.stringArray(forKey: "millie.sync.pendingSpaces") ?? []).compactMap(UUID.init(uuidString:))) {
+        didSet { UserDefaults.standard.set(pendingSpaceTombstones.map(\.uuidString), forKey: "millie.sync.pendingSpaces") }
+    }
+
+    /// Acknowledge only successful server writes. Failed deletions survive quit.
+    func acknowledgeTabDeletion(_ id: UUID) { pendingTabTombstones.remove(id) }
+    func acknowledgeSpaceDeletion(_ id: UUID) { pendingSpaceTombstones.remove(id) }
 
     /// A tab as it arrives from the cloud (decoded by MillieSync).
     struct RemoteTabRecord {
@@ -2470,7 +2499,7 @@ final class BrowserStore: ObservableObject {
         let memberIDs = Set(ctx.tabIDs)
         for tab in tabs where memberIDs.contains(tab.id) && tab.profileKey != key {
             tab.profileKey = key
-            if tab.hasRealized { tab.sleep() }
+            if tab.hasRealized { tab.resetBrowserForProfileChange() }
         }
         if contextID == activeContextID, let sel = selectedTabID,
            memberIDs.contains(sel) {
@@ -2847,5 +2876,52 @@ enum URLInterpreter {
             if let result { freeaddrinfo(result) }
         }
         return getaddrinfo(host, nil, &hints, &result) == 0
+    }
+}
+
+// MARK: - Validated session snapshots
+
+/// Disk operations shared by normal session saves and corruption recovery.
+/// All writes are atomic. Invalid primary bytes are preserved before replacement.
+enum SessionSnapshotStorage {
+    struct LoadResult<Value> {
+        var value: Value?
+        var recovered: Bool
+        var preservedDamagedFile: Bool
+    }
+
+    static func load<Value: Decodable>(_ type: Value.Type, from url: URL) -> LoadResult<Value> {
+        func decode(_ source: URL) -> Value? {
+            guard let data = try? Data(contentsOf: source) else { return nil }
+            return try? JSONDecoder().decode(type, from: data)
+        }
+        if let primary = decode(url) {
+            return LoadResult(value: primary, recovered: false, preservedDamagedFile: false)
+        }
+        var preserved = false
+        if FileManager.default.fileExists(atPath: url.path) {
+            let copy = url.appendingPathExtension("damaged-\(UUID().uuidString)")
+            do { try FileManager.default.copyItem(at: url, to: copy); preserved = true }
+            catch { NSLog("MILLIE_SESSION couldn't preserve damaged session: %@", error.localizedDescription) }
+        }
+        let backup = decode(url.appendingPathExtension("backup"))
+        return LoadResult(value: backup, recovered: backup != nil, preservedDamagedFile: preserved)
+    }
+
+    static func save<Value: Codable>(_ value: Value, to url: URL) throws {
+        let data = try JSONEncoder().encode(value)
+        let backup = url.appendingPathExtension("backup")
+        if let previous = try? Data(contentsOf: url) {
+            if (try? JSONDecoder().decode(Value.self, from: previous)) != nil {
+                try previous.write(to: backup, options: .atomic)
+            } else {
+                // Don't let a later good write erase the only damaged copy.
+                try previous.write(to: url.appendingPathExtension("damaged-\(UUID().uuidString)"), options: .atomic)
+            }
+        }
+        try data.write(to: url, options: .atomic)
+        if !FileManager.default.fileExists(atPath: backup.path) {
+            try data.write(to: backup, options: .atomic)
+        }
     }
 }

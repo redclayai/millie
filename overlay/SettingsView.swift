@@ -12,6 +12,57 @@ struct SettingsView: View {
     @ObservedObject private var adBlock = AdBlockStore.shared
     @Environment(\.palette) private var p
 
+    @State private var selectedCategory: Category = .general
+    @State private var settingsQuery = ""
+
+    private enum Category: String, CaseIterable, Identifiable {
+        case general = "General", search = "Search", privacy = "Privacy", tabs = "Tabs"
+        case appearance = "Appearance", profiles = "Profiles", sync = "Sync", ai = "AI"
+        case routing = "Routing", media = "Media", extensions = "Extensions", about = "About"
+        var id: String { rawValue }
+        var symbol: String {
+            switch self {
+            case .general: return "gearshape"
+            case .search: return "magnifyingglass"
+            case .privacy: return "hand.raised"
+            case .tabs: return "rectangle.stack"
+            case .appearance: return "paintpalette"
+            case .profiles: return "person.crop.circle"
+            case .sync: return "arrow.triangle.2.circlepath"
+            case .ai: return "bubble.left.and.bubble.right"
+            case .routing: return "arrow.triangle.branch"
+            case .media: return "play.rectangle"
+            case .extensions: return "puzzlepiece.extension"
+            case .about: return "info.circle"
+            }
+        }
+        var keywords: String {
+            switch self {
+            case .general: return "homepage new tab import welcome tour setup"
+            case .search: return "search engine google duckduckgo bing brave custom URL suggestions online queries"
+            case .privacy: return "block ads trackers dangerous sites phishing malware history browsing data"
+            case .tabs: return "sleep idle archive keyboard shortcuts ctrl tab cycle recently used"
+            case .appearance: return "theme light dark system sidebar pinned labels folders color gradient peek"
+            case .profiles: return "profiles cookies logins history extensions isolation"
+            case .sync: return "sync sign in out email code primary follower resync devices"
+            case .ai: return "assistant codex anthropic claude openai gpt gemini key model page sharing"
+            case .routing: return "air traffic control routing rules sites spaces host"
+            case .media: return "picture in picture pip video automatic"
+            case .extensions: return "extensions install manage load unpacked"
+            case .about: return "version chromium updates check millie"
+            }
+        }
+    }
+
+    private var matchingCategories: [Category] {
+        let terms = settingsQuery.lowercased().split(whereSeparator: \.isWhitespace)
+        guard !terms.isEmpty else { return [selectedCategory] }
+        return Category.allCases.filter { category in
+            let text = category.rawValue.lowercased() + " " + category.keywords
+            return terms.allSatisfy { text.contains($0) }
+        }
+    }
+
     @State private var syncEmail = ""
     @State private var syncCode = ""
 
@@ -26,29 +77,72 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             header
             Hairline().opacity(0.6)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    generalSection
-                    searchSection
-                    privacySection
-                    aiSection
-                    appearanceSection
-                    tabsSection
-                    profilesSection
-                    syncSection
-                    RoutingSection(store: store)
-                    mediaSection
-                    extensionsSection
-                    aboutSection
+            HStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Category.allCases) { category in
+                            Button {
+                                selectedCategory = category
+                                settingsQuery = ""
+                            } label: {
+                                Label(category.rawValue, systemImage: category.symbol)
+                                    .font(Typography.ui(Typography.base, weight: .medium))
+                                    .foregroundStyle(p.foreground.color)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12).padding(.vertical, 9)
+                                    .background(RoundedRectangle(cornerRadius: Radius.md)
+                                        .fill(selectedCategory == category && settingsQuery.isEmpty
+                                              ? p.input.color : .clear))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(selectedCategory == category ? .isSelected : [])
+                        }
+                    }
+                    .padding(12)
                 }
-                .frame(maxWidth: contentWidth)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 28)
-                .frame(maxWidth: .infinity)
+                .frame(width: 172)
+                Hairline().frame(width: 1)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        if matchingCategories.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("No settings found").font(Typography.ui(20, weight: .semibold))
+                                Text("Try a word like privacy, sidebar, sync, or shortcuts.")
+                                    .foregroundStyle(p.mutedForeground.color)
+                                Button("Clear search") { settingsQuery = "" }
+                            }
+                            .padding(.vertical, 24)
+                        }
+                        ForEach(matchingCategories) { category in
+                            categoryContent(category)
+                        }
+                    }
+                    .frame(maxWidth: contentWidth)
+                    .padding(.horizontal, 24).padding(.vertical, 28)
+                    .frame(maxWidth: .infinity)
+                }
+                .id(settingsQuery.isEmpty ? selectedCategory.rawValue : "search")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(p.background.color)
+    }
+
+    @ViewBuilder private func categoryContent(_ category: Category) -> some View {
+        switch category {
+        case .general: generalSection
+        case .search: searchSection
+        case .privacy: privacySection
+        case .tabs: tabsSection
+        case .appearance: appearanceSection
+        case .profiles: profilesSection
+        case .sync: syncSection
+        case .ai: aiSection
+        case .routing: RoutingSection(store: store)
+        case .media: mediaSection
+        case .extensions: extensionsSection
+        case .about: aboutSection
+        }
     }
 
     private var header: some View {
@@ -81,6 +175,10 @@ struct SettingsView: View {
                 .font(Typography.ui(Typography.title, weight: .semibold))
                 .foregroundStyle(p.foreground.color)
             Spacer()
+            TextField("Search settings", text: $settingsQuery)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 240)
+                .accessibilityLabel("Search settings")
             Button {
                 store.settingsVisible = false
             } label: {
@@ -179,6 +277,15 @@ struct SettingsView: View {
 
     private var searchSection: some View {
         Section(title: "Search") {
+            ToggleRow(isOn: $settings.onlineSearchSuggestions) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Online search suggestions").foregroundStyle(p.foreground.color)
+                    Text("Send what you type to Google for suggestions, regardless of your search engine. Off by default and always off in private Spaces. History suggestions stay on your Mac.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Field(label: "Search engine") {
                 EnumMenu(selection: $settings.searchEngine,
                          options: SearchEngine.allCases) { $0.label }
@@ -322,6 +429,10 @@ struct SettingsView: View {
                     .font(Typography.ui(Typography.base))
                     .foregroundStyle(p.foreground.color)
             }
+            ToggleRow(isOn: $settings.pinnedTabLabels) {
+                Text("Show names on pinned tabs")
+                    .font(Typography.ui(Typography.base)).foregroundStyle(p.foreground.color)
+            }
             ToggleRow(isOn: $settings.tintedFolderCards) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tinted folder backgrounds")
@@ -387,7 +498,7 @@ struct SettingsView: View {
                 .foregroundStyle(p.mutedForeground.color)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Sleeping frees a background tab's memory; it reloads when you return. "
-                 + "Archiving closes stale tabs to the restorable Archive in your Library.")
+                 + "Tabs with unfinished forms, active calls or capture stay awake. Archiving skips these tabs and all private tabs.")
                 .font(Typography.ui(Typography.label))
                 .foregroundStyle(p.mutedForeground.color)
                 .fixedSize(horizontal: false, vertical: true)
@@ -592,6 +703,10 @@ struct SettingsView: View {
                 }
             }
 
+            Text("History sync is available for the Default profile only. Other profiles keep separate local histories. History recorded before profile isolation is kept in Default.")
+                .font(Typography.ui(Typography.label))
+                .foregroundStyle(p.mutedForeground.color)
+                .fixedSize(horizontal: false, vertical: true)
             if let msg = sync.statusMessage {
                 Text(msg).font(Typography.ui(Typography.label)).foregroundStyle(p.mutedForeground.color)
             }
@@ -812,15 +927,14 @@ private struct ToggleRow<Label: View>: View {
     @Environment(\.palette) private var p
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
+        Toggle(isOn: $isOn) {
             label
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Toggle("", isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(p.primary.color)
+                .accessibilityElement(children: .combine)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+            .toggleStyle(.switch)
+            .tint(p.primary.color)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
