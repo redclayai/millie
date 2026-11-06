@@ -95,9 +95,11 @@ extension BrowserStore {
     /// page reloads, which is an acceptable trade for it actually showing.
     func promotePeek() {
         guard let tab = peekTab else { return }
-        guard let url = promotableURL(for: tab) else { warnPeekNotReady(); return }
-        closePeek()
-        focusPromotedTab(newTab(url: url, select: true))
+        promoteWhenReady(tab) { [weak self] url in
+            guard let self else { return }
+            self.closePeek()
+            self.focusPromotedTab(self.newTab(url: url, select: true))
+        }
     }
 
     /// Promote the peeked page and open it in a split beside the tab that was
@@ -105,13 +107,60 @@ extension BrowserStore {
     func promotePeekToSplit() {
         guard let tab = peekTab else { return }
         let previous = selectedTabID
-        guard let url = promotableURL(for: tab) else { warnPeekNotReady(); return }
-        closePeek()
-        let promoted = newTab(url: url, select: true)
-        if let previous, previous != promoted.id {
-            splitWith(previous, side: .right)
+        promoteWhenReady(tab) { [weak self] url in
+            guard let self else { return }
+            self.closePeek()
+            let promoted = self.newTab(url: url, select: true)
+            if let previous, previous != promoted.id {
+                self.splitWith(previous, side: .right)
+            }
+            self.focusPromotedTab(promoted)
         }
-        focusPromotedTab(promoted)
+    }
+
+    /// Resolve the peek's URL and promote, retrying briefly if it isn't readable
+    /// yet. A peek raised from a window.open / external link can still be
+    /// committing its first navigation (SSO redirect chains), so a single ⌘↩
+    /// used to dead-end on the "page still loading" toast and force the user to
+    /// click again. Poll `promotableURL` a few times before giving up, so one
+    /// gesture just works; abort silently if the peek is dismissed/replaced
+    /// meanwhile. If it's STILL unresolved after the grace window, record a
+    /// diagnostic (this is the intermittent "loaded page, no URL" case) and warn.
+    private func promoteWhenReady(_ tab: BrowserTab, attempt: Int = 0,
+                                  _ open: @escaping (String) -> Void) {
+        guard peekTab === tab else { return }   // peek closed/replaced while waiting
+        if let url = promotableURL(for: tab) { open(url); return }
+        if attempt < 10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.promoteWhenReady(tab, attempt: attempt + 1, open)
+            }
+            return
+        }
+        tracePeekNotReady(tab)
+        warnPeekNotReady()
+    }
+
+    /// Append one line to ~/mori_peek_trace.log capturing exactly why promote
+    /// couldn't find a URL (release builds strip NSLog, so trace to a file). Lets
+    /// the next occurrence pin whether the WebContents is missing or just the URL
+    /// sources are empty. Remove once the root cause is fixed.
+    private func tracePeekNotReady(_ tab: BrowserTab) {
+        let realized = tab.hasRealized
+        let diag = realized ? (tab.browserView.peekURLDiagnostics() ?? "nil")
+                            : "<unrealized>"
+        let live = realized ? (tab.browserView.liveURL() ?? "nil") : "<unrealized>"
+        let cur  = realized ? (tab.browserView.currentURL ?? "nil") : "<unrealized>"
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] peek-not-ready "
+                 + "realized=\(realized) urlString=[\(tab.urlString)] "
+                 + "live=[\(live)] currentURL=[\(cur)] \(diag)\n"
+        let path = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("mori_peek_trace.log")
+        guard let data = line.data(using: .utf8) else { return }
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
     }
 
     /// After promoting a Peek, force keyboard focus onto the new tab so its

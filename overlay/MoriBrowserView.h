@@ -76,6 +76,10 @@ typedef void (^MoriJavaScriptResultHandler)(id _Nullable result,
 /// committed) — independent of whether our navigation callbacks ever fired.
 /// Empty string if the page has no address yet.
 - (NSString *)liveURL;
+/// One-line engine URL diagnostics for the Peek "page still loading" path:
+/// whether a WebContents is attached, its visible / committed / pending URLs and
+/// navigation-entry count. Used only by the Peek promote tracer.
+- (NSString *)peekURLDiagnostics;
 @property(nonatomic, copy, readonly) NSString *currentTitle;
 @property(nonatomic, readonly) BOOL isLoading;
 @property(nonatomic, readonly) BOOL canGoBack;

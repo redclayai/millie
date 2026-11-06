@@ -2688,6 +2688,23 @@ Browser* ActiveBrowser() {
   return url.is_valid() ? base::SysUTF8ToNSString(url.spec()) : @"";
 }
 
+- (NSString*)peekURLDiagnostics {
+  if (!_webContents) {
+    return @"wc=0";
+  }
+  content::NavigationController& controller = _webContents->GetController();
+  content::NavigationEntry* pending = controller.GetPendingEntry();
+  content::NavigationEntry* lastEntry = controller.GetLastCommittedEntry();
+  return base::SysUTF8ToNSString(base::StringPrintf(
+      "wc=1 loading=%d entries=%d visible=[%s] committed=[%s] pending=[%s] "
+      "lastEntry=[%s]",
+      _webContents->IsLoading() ? 1 : 0, controller.GetEntryCount(),
+      _webContents->GetVisibleURL().possibly_invalid_spec().c_str(),
+      _webContents->GetLastCommittedURL().possibly_invalid_spec().c_str(),
+      pending ? pending->GetURL().possibly_invalid_spec().c_str() : "",
+      lastEntry ? lastEntry->GetURL().possibly_invalid_spec().c_str() : ""));
+}
+
 - (void)focusBrowser {
   if (!_webContents || !g_mori_browser) {
     return;
