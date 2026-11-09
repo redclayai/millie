@@ -197,7 +197,7 @@ ui::TrackedElement* MoriLocationBar::GetAnchorOrNull() {
   return nullptr;
 }
 
-Browser* MoriLocationBar::GetBrowser() {
+BrowserWindowInterface* MoriLocationBar::GetBrowser() {
   return nullptr;
 }
 
@@ -641,13 +641,13 @@ gfx::Size MoriBrowserWindow::GetContentsSize() const {
 
 void MoriBrowserWindow::SetContentsSize(const gfx::Size& size) {}
 
-void MoriBrowserWindow::UpdatePageActionIcon(PageActionIconType type) {}
-
 autofill::AutofillBubbleHandler* MoriBrowserWindow::GetAutofillBubbleHandler() {
   return nullptr;
 }
 
-void MoriBrowserWindow::ExecutePageActionIconForTesting(PageActionIconType type) {}
+ui::AcceleratorProvider* MoriBrowserWindow::GetAcceleratorProvider() {
+  return nullptr;
+}
 
 LocationBar* MoriBrowserWindow::GetLocationBar() const {
   return const_cast<MoriLocationBar*>(&location_bar_);

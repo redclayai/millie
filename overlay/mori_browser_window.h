@@ -80,7 +80,9 @@ class MoriLocationBar : public LocationBar {
   void OnChanged() override;
   void UpdateWithoutTabRestore() override;
   ui::TrackedElement* GetAnchorOrNull() override;
-  Browser* GetBrowser() override;
+  // 155: LocationBar::GetBrowser() now returns BrowserWindowInterface* (was
+  // Browser*). Match the base signature — the stub returns null regardless.
+  BrowserWindowInterface* GetBrowser() override;
   Profile* GetProfile() override;
   bool IsInitialized() const override;
   bool IsVisible() const override;
@@ -214,12 +216,13 @@ class MoriBrowserWindow : public BrowserWindow {
   void OnTabDetached(content::WebContents* contents, bool was_active) override;
   gfx::Size GetContentsSize() const override;
   void SetContentsSize(const gfx::Size& size) override;
-  // 153 removed UpdatePageActionIcon / ExecutePageActionIconForTesting from the
-  // BrowserWindow interface; kept as no-op members (definitions remain in the
-  // .mm) but no longer 'override'.
-  void UpdatePageActionIcon(PageActionIconType type);
+  // 155 removed UpdatePageActionIcon / ExecutePageActionIconForTesting AND the
+  // PageActionIconType enum itself from the tree, so the no-op stubs are gone.
   autofill::AutofillBubbleHandler* GetAutofillBubbleHandler() override;
-  void ExecutePageActionIconForTesting(PageActionIconType type);
+  // 155 added GetAcceleratorProvider() as a pure virtual on BrowserWindow;
+  // Millie has no Views accelerator provider, so return null (as
+  // TestBrowserWindow does).
+  ui::AcceleratorProvider* GetAcceleratorProvider() override;
   LocationBar* GetLocationBar() const override;
   void SetFocusToLocationBar(bool is_user_initiated) override;
   void UpdateReloadStopState(bool is_loading, bool force) override;
