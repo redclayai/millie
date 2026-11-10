@@ -17,6 +17,21 @@
    }
  }
  
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -1486,7 +1486,11 @@
+ config("clang_revision") {
+   if (is_clang && clang_base_path == default_clang_base_path &&
+       current_os != "zos") {
+-    _perform_consistency_checks = current_toolchain == default_toolchain
++    # Millie: we build with a custom prebuilt clang (23.1.0) that intentionally
++    # lags Chromium's pinned clang (24). Skip the revision/version consistency
++    # asserts; clang_version is pinned to "23" in args.gn to match the resource
++    # dir. (Fold into chromium-tree.patch.)
++    _perform_consistency_checks = false
+     if (llvm_force_head_revision) {
+       _head_revision_stamp_path = "//third_party/llvm-build/force_head_revision"
+       _head_revision = ""
 --- a/build/config/mac/BUILD.gn
 +++ b/build/config/mac/BUILD.gn
 @@ -36,6 +36,20 @@
@@ -56,7 +71,7 @@
 +}
 --- a/build/toolchain/apple/toolchain.gni
 +++ b/build/toolchain/apple/toolchain.gni
-@@ -763,10 +763,11 @@
+@@ -778,10 +778,11 @@
        pool = "//build/toolchain/apple:bundle_pool($default_toolchain)"
      }
  
@@ -72,20 +87,20 @@
        tool("swift") {
          _tool = rebase_path("//build/toolchain/apple/swiftc.py", root_build_dir)
  
-@@ -850,7 +851,8 @@
+@@ -865,7 +866,8 @@
            _env_vars += " XCODE_VERSION=${toolchain_args.xcode_build}"
          }
  
 -        if (invoker.sdk_developer_dir != "") {
 +        if (defined(invoker.sdk_developer_dir) &&
 +            invoker.sdk_developer_dir != "") {
-           _env_vars += " DEVELOPER_DIR=${toolchain_args.sdk_developer_dir}"
+           _env_vars += " DEVELOPER_DIR=${invoker.sdk_developer_dir}"
          }
  
 --- a/chrome/BUILD.gn
 +++ b/chrome/BUILD.gn
-@@ -604,6 +604,12 @@
-         rebase_path(inputs[0], root_out_dir),
+@@ -629,6 +629,12 @@
+         "@executable_path/../Frameworks/$chrome_framework_name.framework/Versions/$chrome_framework_version/$chrome_framework_name",
          "--allow",
          "/usr/lib/libSystem.B.dylib",
 +
@@ -97,7 +112,7 @@
        ]
        deps = [ ":chrome_app" ]
      }
-@@ -1379,6 +1385,12 @@
+@@ -1399,6 +1405,12 @@
      ]
  
      public_deps = [ ":chrome_dll" ]
@@ -110,7 +125,7 @@
  
      bundle_deps = [
        ":aperitif_library",
-@@ -1415,6 +1427,12 @@
+@@ -1435,6 +1447,12 @@
        chrome_dylib_version,
        "-current_version",
        chrome_dylib_version,
@@ -125,10 +140,10 @@
      if (!is_component_build) {
 --- a/chrome/app/chrome_main_delegate.cc
 +++ b/chrome/app/chrome_main_delegate.cc
-@@ -1120,6 +1120,24 @@
- }
- 
+@@ -1194,6 +1194,39 @@
  std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
+   crash_reporter::InitializeCrashKeys();
+ 
 +  // Millie: bake in the switches required for premium DRM streaming so they
 +  // apply on a normal (Dock) launch without being passed manually.
 +  //  - PlatformHEVCDecoderSupport: HEVC is compiled in but gated off at runtime.
@@ -146,7 +161,22 @@
 +              ? "PlatformHEVCDecoderSupport"
 +              : mori_features + ",PlatformHEVCDecoderSupport");
 +    }
++    // Millie: FedCM's account picker is a Views dialog that anchors to a Views
++    // browser window via Widget::GetNativeView(). Millie's chrome is SwiftUI
++    // (non-Views MoriBrowserWindow), so that anchor is null and FedCM sign-in
++    // (e.g. Google Sign-In) segfaults in CreateDialogWidget(). Disable FedCM so
++    // sites fall back to the classic popup/redirect OAuth flow, which works.
++    {
++      std::string mori_disabled =
++          mori_cmd->GetSwitchValueASCII("disable-features");
++      if (mori_disabled.find("FedCm") == std::string::npos) {
++        mori_cmd->AppendSwitchASCII(
++            "disable-features",
++            mori_disabled.empty() ? "FedCm" : mori_disabled + ",FedCm");
++      }
++    }
 +  }
++
  #if BUILDFLAG(IS_CHROMEOS)
    ash::BootTimesRecorder::Get()->SaveChromeMainStats();
  #endif
@@ -160,7 +190,7 @@
  #include "chrome/browser/ui/browser_command_controller.h"
  #include "chrome/browser/ui/browser_commands.h"
  #include "chrome/browser/ui/browser_live_tab_context.h"
-@@ -2637,6 +2638,19 @@
+@@ -2643,6 +2644,19 @@
  
  void OpenStartupTabsInBrowserWithProfile(const StartupTabs& tabs,
                                           Profile* profile) {
@@ -182,15 +212,15 @@
    // Prefer a regular (non-incognito) profile
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
-@@ -479,6 +479,7 @@
+@@ -497,6 +497,7 @@
  #include "base/apple/foundation_util.h"
  #include "chrome/browser/browser_process_platform_part_mac.h"
  #include "chrome/browser/enterprise/platform_auth/platform_auth_proxying_url_loader_factory.h"
 +#include "chrome/browser/ui/mori/mori_adblock.h"  // Millie built-in ad blocker
  #include "chrome/common/chrome_version.h"
- #include "components/enterprise/platform_auth/platform_auth_features.h"
  #include "components/soda/constants.h"
-@@ -6716,6 +6717,20 @@
+ #include "sandbox/mac/sandbox_serializer.h"
+@@ -6957,6 +6958,20 @@
    signin::ProxyingURLLoaderFactory::MaybeProxyRequest(
        frame, type == URLLoaderFactoryType::kNavigation, request_initiator,
        isolation_info, factory_builder);
@@ -211,7 +241,7 @@
  
  #if BUILDFLAG(ENABLE_CAPTIVE_PORTAL_DETECTION)
    if (disable_secure_dns) {
-@@ -8390,32 +8405,6 @@
+@@ -8730,32 +8745,6 @@
                                     soda_language_pack_path.value()));
      return true;
    }
@@ -246,7 +276,7 @@
  }
 --- a/chrome/browser/component_updater/BUILD.gn
 +++ b/chrome/browser/component_updater/BUILD.gn
-@@ -188,6 +188,9 @@
+@@ -197,6 +197,9 @@
      "//media",
      "//services/cert_verifier/public/mojom",
      "//services/network/public/cpp",
@@ -277,7 +307,7 @@
  #endif
 @@ -65,6 +75,69 @@
      0x9b, 0xfb, 0x4f, 0xbb, 0x1b, 0xa9, 0xd3, 0x85, 0x37, 0xef};
- static_assert(std::size(kWidevineSha2Hash) == crypto::kSHA256Length);
+ static_assert(std::size(kWidevineSha2Hash) == crypto::hash::kSha256Size);
  
 +#if BUILDFLAG(IS_MAC)
 +// Millie: seed the bundled Widevine CDM into the user-data dir on first run.
@@ -358,7 +388,7 @@
    installer->Register(cus, base::OnceClosure());
 --- a/chrome/browser/new_tab_page/feature_promo_helper/new_tab_page_feature_promo_helper.cc
 +++ b/chrome/browser/new_tab_page/feature_promo_helper/new_tab_page_feature_promo_helper.cc
-@@ -205,7 +205,9 @@
+@@ -198,7 +198,9 @@
      content::WebContents* web_contents) {
  #if !BUILDFLAG(IS_ANDROID)
    auto* browser_interface = webui::GetBrowserWindowInterface(web_contents);
@@ -379,44 +409,7 @@
  import("//build/config/buildflags_paint_preview.gni")
  import("//build/config/chrome_build.gni")
  import("//build/config/compiler/compiler.gni")
-@@ -2546,6 +2547,20 @@
- 
-   if (is_mac) {
-     sources += [
-+      # Mori overlay: native SwiftUI browser chrome bridge (see mori/).
-+      "mori/MoriBrowserView.h",
-+      "mori/MoriPrivacy.h",
-+      "mori/mori_adblock.h",
-+      "mori/mori_adblock.mm",
-+      "mori/mori_browser_window.h",
-+      "mori/mori_browser_window.mm",
-+      "mori/mori_chrome_bridge.mm",
-+      "mori/mori_chrome_extensions.mm",
-+      "mori/mori_chrome_hooks.h",
-+      "mori/mori_import.h",
-+      "mori/mori_import.mm",
-+      "mori/mori_permission_prompt.h",
-+      "mori/mori_permission_prompt.mm",
-       "views/frame/browser_frame_view_factory_mac.mm",
-       "views/frame/browser_frame_view_mac.h",
-       "views/frame/browser_frame_view_mac.mm",
-@@ -2584,6 +2599,7 @@
-       "//chrome/browser:app_controller_mac",
-       "//chrome/browser:chrome_browser_application_mac",
-       "//chrome/browser:global_keyboard_shortcuts_mac",
-+      ":mori_ui_swift",
-       "//chrome/browser/mac",
-       "//chrome/browser/renderer_host:delegate",
-       "//chrome/browser/renderer_host:history_swiping_control",
-@@ -3806,7 +3822,6 @@
-     "//components/dom_distiller/core",
-     "//components/enterprise/buildflags",
-     "//components/paint_preview/buildflags",
--    "//components/safe_browsing:buildflags",
-     "//components/segmentation_platform/public",
-     "//components/sync",
-     "//components/sync_user_events",
-@@ -4682,6 +4697,109 @@
+@@ -2535,6 +2536,109 @@
        "//chrome/browser/profiles:profile",
        "//chrome/browser/ui/browser_window:create_browser_window",
        "//ui/base",
@@ -528,7 +521,7 @@
  }
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
-@@ -57,6 +57,7 @@
+@@ -62,6 +62,7 @@
  #include "chrome/browser/ui/actions/command_action_updater.h"
  #include "chrome/browser/ui/browser_actions.h"
  #include "chrome/browser/ui/browser_commands.h"
@@ -536,7 +529,7 @@
  #include "chrome/browser/ui/browser_element_identifiers.h"
  #include "chrome/browser/ui/browser_select_file_dialog_controller.h"
  #include "chrome/browser/ui/browser_window.h"
-@@ -644,6 +645,16 @@
+@@ -663,6 +664,16 @@
      return false;
    }
  
@@ -555,7 +548,7 @@
    // most/all commands should not have been enabled yet anyway or the ones that
 --- a/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
 +++ b/chrome/browser/ui/read_anything/read_anything_side_panel_controller.cc
-@@ -263,12 +263,11 @@
+@@ -182,12 +182,11 @@
    // not create a SidePanelCoordinator. This block will be unnecessary once that
    // changes.
    if (!side_panel_ui) {
@@ -579,7 +572,7 @@
      return nullptr;
    }
    BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
--  DCHECK(browser_view);
+-  CHECK(browser_view, base::NotFatalUntil::M162);
 +  if (!browser_view) {
 +    return nullptr;  // Millie: no BrowserView (SwiftUI chrome).
 +  }
@@ -588,7 +581,7 @@
      if (contents_view->web_contents() == web_contents) {
 --- a/chrome/browser/ui/toasts/toast_controller.cc
 +++ b/chrome/browser/ui/toasts/toast_controller.cc
-@@ -319,11 +319,9 @@
+@@ -334,11 +334,9 @@
    // ToastController testability.
    views::View* anchor_view = GetAnchorView(spec->is_global_scope());
    if (!anchor_view) {
@@ -603,6 +596,48 @@
      return;
    }
  
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -1983,7 +1983,27 @@
+   }
+ 
+   source_set("browser_native_widget_mac_impl") {
+-    sources = [ "browser_native_widget_mac.mm" ]
++    sources = [
++      "browser_native_widget_mac.mm",
++
++      # Mori overlay: native SwiftUI browser chrome bridge (see
++      # //chrome/browser/ui/mori/). Compiled here so they inherit this mac
++      # window target's include/dep environment (the 155-era monolith split in
++      # 158; this is its successor target).
++      "//chrome/browser/ui/mori/MoriBrowserView.h",
++      "//chrome/browser/ui/mori/MoriPrivacy.h",
++      "//chrome/browser/ui/mori/mori_adblock.h",
++      "//chrome/browser/ui/mori/mori_adblock.mm",
++      "//chrome/browser/ui/mori/mori_browser_window.h",
++      "//chrome/browser/ui/mori/mori_browser_window.mm",
++      "//chrome/browser/ui/mori/mori_chrome_bridge.mm",
++      "//chrome/browser/ui/mori/mori_chrome_extensions.mm",
++      "//chrome/browser/ui/mori/mori_chrome_hooks.h",
++      "//chrome/browser/ui/mori/mori_import.h",
++      "//chrome/browser/ui/mori/mori_import.mm",
++      "//chrome/browser/ui/mori/mori_permission_prompt.h",
++      "//chrome/browser/ui/mori/mori_permission_prompt.mm",
++    ]
+     public_deps = [ ":browser_native_widget_mac" ]
+     deps = [
+       ":browser_frame_view",
+@@ -1995,6 +2015,10 @@
+       "//chrome/app:generated_resources",
+       "//chrome/browser:app_controller_mac",
+       "//chrome/browser:global_keyboard_shortcuts_mac",
++      "//chrome/browser/ui:mori_ui_swift",
++      # Millie: mori_browser_window.mm pulls browser.h → sharing_message headers,
++      # which need the generated proto include path (brings google/protobuf/any.pb.h).
++      "//components/sharing_message/proto",
+       "//chrome/browser/apps/app_shim",
+       "//chrome/browser/browsing_data",
+       "//chrome/browser/media/router:media_router_feature",
 --- a/chrome/browser/ui/views/frame/browser_window_factory.cc
 +++ b/chrome/browser/ui/views/frame/browser_window_factory.cc
 @@ -27,6 +27,11 @@
@@ -637,38 +672,38 @@
    // function returns. The occlusion status will be computed only once once this
 --- a/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
 +++ b/chrome/browser/ui/views/permissions/permission_prompt_factory.cc
-@@ -40,6 +40,8 @@
+@@ -39,6 +39,10 @@
+ #include "third_party/blink/public/common/features_generated.h"
  #include "url/origin.h"
  
- #if BUILDFLAG(IS_MAC)
-+#include "chrome/browser/ui/browser.h"
++#if BUILDFLAG(IS_MAC)
 +#include "chrome/browser/ui/mori/mori_permission_prompt.h"
- #include "chrome/browser/ui/views/permissions/permission_prompt_notifications_mac.h"
- #include "chrome/browser/web_applications/os_integration/mac/web_app_shortcut_mac.h"
- #endif
-@@ -300,6 +302,19 @@
++#endif
++
+ namespace {
+ 
+ BrowserWindowInterface* GetBrowser(content::WebContents* web_contents) {
+@@ -323,6 +327,17 @@
+     return nullptr;
    }
  
- #if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC)
 +  // Mori overlay: normal windows use the SwiftUI chrome (MoriBrowserWindow),
 +  // which has no Views toolbar/location bar for the standard permission bubble
 +  // to anchor to (anchoring there null-derefs). Use Mori's native sheet.
-+  // M151: this factory no longer receives a Browser*; derive it from the tab.
-+  BrowserWindowInterface* mori_bwi =
-+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
-+  if (mori_bwi &&
++  if (BrowserWindowInterface* mori_bwi = GetBrowser(web_contents);
++      mori_bwi &&
 +      mori_bwi->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL) {
 +    return mori::CreateMoriPermissionPrompt(web_contents, delegate);
 +  }
 +#endif
 +
-+#if BUILDFLAG(IS_MAC)
-   // If this is a notification permission request coming from a PWA (or a PWA
-   // associated tab), and this is the first time we show a permission prompt for
-   // this request, try using a OS-native permission prompt. If showing the
+   if (web_app::AppBrowserController::IsWebApp(GetBrowser(web_contents))) {
+     return CreatePwaPrompt(web_contents, delegate);
+   } else if (delegate->ShouldCurrentRequestUseQuietUI()) {
 --- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
 +++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
-@@ -906,7 +906,9 @@
+@@ -882,7 +882,9 @@
  
    auto* footer_controller =
        new_tab_footer::NewTabFooterController::From(browser);
@@ -679,7 +714,7 @@
    OnFooterVisibilityUpdated(footer_controller->GetFooterVisible(web_contents_));
  #endif  // !BUILDFLAG(IS_ANDROID)
  }
-@@ -1236,7 +1238,9 @@
+@@ -1212,7 +1214,9 @@
  
    auto* footer_controller =
        new_tab_footer::NewTabFooterController::From(browser);
@@ -692,21 +727,17 @@
  }
 --- a/chrome/browser/ui/webui/new_tab_page_third_party/new_tab_page_third_party_handler.cc
 +++ b/chrome/browser/ui/webui/new_tab_page_third_party/new_tab_page_third_party_handler.cc
-@@ -54,9 +54,12 @@
- void NewTabPageThirdPartyHandler::NotifyAboutTheme() {
-   auto theme = new_tab_page_third_party::mojom::Theme::New();
-   auto most_visited = most_visited::mojom::MostVisitedTheme::New();
+@@ -80,13 +80,17 @@
+   theme->color_background = color_utils::SkColorToRgbaString(
+       color_provider.GetColor(kColorNewTabPageBackground));
+ #else
 +  // Millie hosts the NTP web_contents in MoriBrowserWindow, a non-Views window
 +  // whose hosting widget exposes no ui::ThemeProvider, so this returns null.
-+  // Don't DCHECK/dereference it unconditionally; the custom-background block
-+  // below is guarded instead (Chrome themes are unused in Millie).
++  // Don't CHECK/dereference it unconditionally; the custom-background block
++  // below is already guarded (Chrome themes are unused in Millie).
    const ui::ThemeProvider* theme_provider =
        webui::GetThemeProviderDeprecated(web_contents_);
--  DCHECK(theme_provider);
-   const ui::ColorProvider& color_provider = web_contents_->GetColorProvider();
-   most_visited->background_color =
-       color_provider.GetColor(kColorNewTabPageMostVisitedTileBackground);
-@@ -67,7 +70,8 @@
+-  CHECK(theme_provider, base::NotFatalUntil::M162);
    theme->color_background = color_utils::SkColorToRgbaString(GetThemeColor(
        webui::GetNativeThemeDeprecated(web_contents_),
        web_contents_->GetColorProvider(), kColorNewTabPageBackground));
@@ -718,7 +749,7 @@
          GetNewTabBackgroundPositionCSS(*theme_provider);
 --- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
 +++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_page_handler.cc
-@@ -550,7 +550,9 @@
+@@ -560,7 +560,9 @@
  
    auto* footer_controller =
        new_tab_footer::NewTabFooterController::From(browser);
@@ -727,11 +758,11 @@
 +    return;  // Millie: no BrowserView => no footer controller.
 +  }
    footer_controller_observation_.Observe(footer_controller);
+ #endif
  }
- 
 --- a/components/embedder_support/user_agent_utils.cc
 +++ b/components/embedder_support/user_agent_utils.cc
-@@ -163,9 +163,11 @@
+@@ -159,9 +159,11 @@
    bool parse_result = base::StringToInt(major_version, &major_version_number);
    DCHECK(parse_result);
    std::optional<std::string> brand;
@@ -748,7 +779,7 @@
        output_version_type == blink::UserAgentBrandVersionType::kFullVersion
 --- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
 +++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
-@@ -850,8 +850,12 @@
+@@ -853,8 +853,12 @@
      return [_responderDelegate acceptsMouseEventsOption];
    }
  
@@ -763,3 +794,38 @@
  }
  
  - (BOOL)acceptsFirstMouse:(NSEvent*)theEvent {
+--- a/device/fido/mac/icloud_keychain_sys.mm
++++ b/device/fido/mac/icloud_keychain_sys.mm
+@@ -15,6 +15,14 @@
+ #include "device/fido/large_blob.h"
+ #include "device/fido/mac/icloud_keychain_internals.h"
+ #include "device/fido/public/features.h"
++
++// Millie: building against the pinned MacOSX26.0.sdk, which predates macOS 26.2
++// and so does not declare +isDeviceConfiguredForPasskeys. Forward-declare it;
++// the only call site is API_AVAILABLE(macos(26.2))-gated, so it is never invoked
++// on an older OS.
++@interface ASAuthorizationWebBrowserPublicKeyCredentialManager (MillieForwardDecl)
+++ (BOOL)isDeviceConfiguredForPasskeys;
++@end
+ 
+ namespace {
+ 
+--- a/v8/tools/metagen/compile_flags.py
++++ b/v8/tools/metagen/compile_flags.py
+@@ -180,10 +180,13 @@
+     shutil.copyfile(
+         os.path.join(build_dir, "args.gn"), os.path.join(tmp_dir, "args.gn"))
+     if sys.platform == "darwin":
+-      sdk_links = os.path.join(build_dir, "xcode_links")
++      # Millie: our pinned mac_sdk_path lives under <build_dir>/sdk/xcode_links
++      # (not <build_dir>/xcode_links), so mirror that subdir into the temp dir.
++      sdk_links = os.path.join(build_dir, "sdk", "xcode_links")
+       if os.path.isdir(sdk_links):
+         shutil.copytree(
+-            sdk_links, os.path.join(tmp_dir, "xcode_links"), symlinks=True)
++            sdk_links, os.path.join(tmp_dir, "sdk", "xcode_links"),
++            symlinks=True)
+       # Explicit SDK paths supplied by embedder build tools must stay below
+       # the query's output directory for Chromium's sdk_inputs action.
+       old_sdk_root = "//" + os.path.relpath(build_dir, source_root) + "/"

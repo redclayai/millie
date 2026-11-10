@@ -1939,7 +1939,7 @@ Browser* ActiveBrowser() {
 
   NavigateParams params(targetBrowser, url,
                         ui::PAGE_TRANSITION_AUTO_TOPLEVEL);
-  params.disposition = WindowOpenDisposition::NEW_BACKGROUND_TAB;
+  params.disposition = WindowOpenDisposition::kNewBackgroundTab;
   params.window_action = NavigateParams::WindowAction::kNoAction;
   g_self_insert_in_progress = true;
   Navigate(&params);
@@ -1973,10 +1973,9 @@ Browser* ActiveBrowser() {
   // this is Millie's single per-tab adoption chokepoint — and guard against a
   // double-create. The helper triggers off TabStripModel activation changes
   // (focusBrowser -> ActivateTabAt), which Millie drives on every tab switch.
-  if (webContents &&
-      !AutoPictureInPictureTabHelper::FromWebContents(webContents)) {
-    AutoPictureInPictureTabHelper::CreateForWebContents(webContents);
-  }
+  // Millie: Chromium 158 removed AutoPictureInPictureTabHelper::CreateForWebContents.
+  // The helper is now attached via TabFeatures/TabHelpers for real TabModels, so the
+  // defensive manual attach is dropped (auto document-PiP relies on that path).
 
   NSView* webView = webContents->GetNativeView().GetNativeNSView();
   _webView = webView;

@@ -780,6 +780,11 @@ ExclusiveAccessContext* MoriBrowserWindow::GetExclusiveAccessContext() {
   return &exclusive_access_context_;
 }
 
+// Millie: non-normal window (SwiftUI chrome) has no pinned toolbar actions.
+PinnedToolbarActions* MoriBrowserWindow::GetPinnedToolbarActions() {
+  return nullptr;
+}
+
 std::string MoriBrowserWindow::GetWorkspace() const {
   return {};
 }

@@ -656,7 +656,7 @@ void OpenInNewTab(const GURL& url) {
     return;
   }
   NavigateParams params(browser, url, ui::PAGE_TRANSITION_TYPED);
-  params.disposition = WindowOpenDisposition::NEW_BACKGROUND_TAB;
+  params.disposition = WindowOpenDisposition::kNewBackgroundTab;
   params.window_action = NavigateParams::WindowAction::kNoAction;
   Navigate(&params);
 }
@@ -1115,9 +1115,11 @@ NSString* InstallTypeString(const extensions::Extension& extension) {
   }
   args.Append(std::move(tab_value));
 
+  // Millie: Chromium 158 changed Event's args param from base::Value::List to
+  // scoped_refptr<const EventArgs> (= RefCountedData<base::Value::List>).
   auto event = std::make_unique<extensions::Event>(
       extensions::events::COMMANDS_ON_COMMAND, "commands.onCommand",
-      std::move(args), profile);
+      base::MakeRefCounted<extensions::EventArgs>(std::move(args)), profile);
   event->user_gesture = extensions::EventRouter::UserGestureState::kEnabled;
   extensions::EventRouter::Get(profile)->DispatchEventToExtension(
       extension->id(), std::move(event));
