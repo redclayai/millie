@@ -107,6 +107,29 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(aiIntegrationEnabled, forKey: Key.aiIntegrationEnabled) }
     }
 
+    /// "Bring your own agent" (Ardia parity): expose a loopback MCP server so an
+    /// external terminal agent (Claude Code / Codex) can drive Millie. Off by
+    /// default; every tool call still asks for approval. Per-machine, never
+    /// synced. See `MillieAgentServer`.
+    @Published var agentServerEnabled: Bool {
+        didSet {
+            defaults.set(agentServerEnabled, forKey: Key.agentServerEnabled)
+            Task { @MainActor in MillieAgentServer.shared.applySettings() }
+        }
+    }
+
+    /// The loopback port the agent MCP server bound (persisted so the paste-in
+    /// command stays stable across launches). Per-machine, never synced.
+    @Published var agentServerPort: Int {
+        didSet { defaults.set(agentServerPort, forKey: Key.agentServerPort) }
+    }
+
+    /// The bearer token the agent MCP server requires. A per-machine secret —
+    /// never synced, like Keychain-backed API keys.
+    @Published var agentServerToken: String {
+        didSet { defaults.set(agentServerToken, forKey: Key.agentServerToken) }
+    }
+
     /// Whether "Ask Milly" may attach the current page's text to a cloud
     /// provider request. When off — or on a private Space, an internal Millie
     /// page, or a local file — only the user's question is sent, never page
@@ -302,6 +325,9 @@ final class BrowserSettings: ObservableObject {
         static let previewOnHover = "mori.previewOnHover"
         static let welcomeSeen = "mori.welcomeSeen"
         static let aiIntegrationEnabled = "mori.aiIntegrationEnabled"
+        static let agentServerEnabled = "mori.agentServerEnabled"
+        static let agentServerPort = "mori.agentServerPort"
+        static let agentServerToken = "mori.agentServerToken"
         static let sharesPageWithAI = "mori.sharesPageWithAI"
         static let assistantProvider = "mori.assistantProvider"
         static let theme = "mori.theme"
@@ -349,6 +375,9 @@ final class BrowserSettings: ObservableObject {
         previewOnHover = defaults.object(forKey: Key.previewOnHover) as? Bool ?? true
         welcomeSeen = defaults.object(forKey: Key.welcomeSeen) as? Bool ?? false
         aiIntegrationEnabled = defaults.object(forKey: Key.aiIntegrationEnabled) as? Bool ?? true
+        agentServerEnabled = defaults.object(forKey: Key.agentServerEnabled) as? Bool ?? false
+        agentServerPort = defaults.object(forKey: Key.agentServerPort) as? Int ?? 0
+        agentServerToken = defaults.string(forKey: Key.agentServerToken) ?? ""
         sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
         assistantProvider = AIProvider(rawValue: defaults.string(forKey: Key.assistantProvider) ?? "") ?? .codex
         theme = ThemePreference(rawValue: defaults.string(forKey: Key.theme) ?? "")

@@ -374,6 +374,9 @@ final class BrowserStore: ObservableObject {
             MillieUpdater.shared.start()
             // Begin live-folder polling (RSS / GitHub), across all Spaces.
             LiveFolderStore.shared.start(provider: { [weak self] in self?.allFolders ?? [] })
+            // Bring up the "bring your own agent" MCP server if the user enabled
+            // it (loopback-only, token-gated, off by default).
+            MillieAgentServer.shared.attach(store: self)
         }
     }
 

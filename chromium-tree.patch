@@ -409,10 +409,13 @@
  import("//build/config/buildflags_paint_preview.gni")
  import("//build/config/chrome_build.gni")
  import("//build/config/compiler/compiler.gni")
-@@ -2538,3 +2539,109 @@
-     ]
-   }
- }
+@@ -2535,6 +2536,113 @@
+       "//chrome/browser/profiles:profile",
+       "//chrome/browser/ui/browser_window:create_browser_window",
+       "//ui/base",
++    ]
++  }
++}
 +
 +# Mori overlay: SwiftUI browser chrome compiled as a Swift module and
 +# linked into the //chrome/browser/ui library (see mori/).
@@ -463,6 +466,7 @@
 +      "mori/MediaController.swift",
 +      "mori/MediaPlayer.swift",
 +      "mori/MediaPolling.swift",
++      "mori/MillieAgentServer.swift",
 +      "mori/MillieSync.swift",
 +      "mori/MillieUpdater.swift",
 +      "mori/MillyAIClient.swift",
@@ -498,7 +502,7 @@
 +      "mori/URLCleaner.swift",
 +      "mori/WebContainerView.swift",
 +      "mori/WelcomeOverlay.swift",
-+    ]
+     ]
 +    bridge_header = "mori/mori_bridge.h"
 +    # -F so swiftc finds the Sparkle module for `import Sparkle`.
 +    swiftflags = [
@@ -517,8 +521,8 @@
 +      "SwiftUI.framework",
 +      "UniformTypeIdentifiers.framework",
 +    ]
-+  }
-+}
+   }
+ }
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
 @@ -62,6 +62,7 @@

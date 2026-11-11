@@ -10,6 +10,7 @@ struct SettingsView: View {
     @ObservedObject private var extensions = ExtensionStore.shared
     @ObservedObject private var sync = MillieSync.shared
     @ObservedObject private var adBlock = AdBlockStore.shared
+    @ObservedObject private var agent = MillieAgentServer.shared
     @Environment(\.palette) private var p
 
     @State private var selectedCategory: Category = .general
@@ -52,7 +53,7 @@ struct SettingsView: View {
             case .appearance: return "theme light dark system sidebar pinned labels folders color gradient peek preview hover glance"
             case .profiles: return "profiles cookies logins history extensions isolation"
             case .sync: return "sync sign in out email code primary follower resync devices"
-            case .ai: return "assistant codex anthropic claude openai gpt gemini key model page sharing"
+            case .ai: return "assistant codex anthropic claude openai gpt gemini key model page sharing agent mcp claude code terminal bring your own automation control"
             case .routing: return "air traffic control routing rules sites spaces host"
             case .media: return "picture in picture pip video automatic"
             case .extensions: return "extensions install manage load unpacked"
@@ -446,9 +447,72 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Hairline().opacity(0.5)
+
+            agentControlBlock
         }
         .onAppear { loadAssistantDrafts() }
         .onChange(of: settings.assistantProvider) { _, _ in loadAssistantDrafts() }
+    }
+
+    @ViewBuilder private var agentControlBlock: some View {
+        ToggleRow(isOn: $settings.agentServerEnabled) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Bring your own agent")
+                    .font(Typography.ui(Typography.base))
+                    .foregroundStyle(p.foreground.color)
+                Text("Let your own Claude Code or Codex drive Millie from the terminal — logins and all — over a local, token-protected MCP server. Every action still asks for approval.")
+                    .font(Typography.ui(Typography.label))
+                    .foregroundStyle(p.mutedForeground.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        if settings.agentServerEnabled {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill((agent.isRunning ? p.primary.color : p.mutedForeground.color).opacity(agent.isRunning ? 1 : 0.5))
+                    .frame(width: 7, height: 7)
+                Text(agent.statusMessage)
+                    .font(Typography.ui(Typography.label))
+                    .foregroundStyle(p.mutedForeground.color)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Add Millie to Claude Code")
+                    .font(Typography.ui(Typography.label, weight: .medium))
+                    .foregroundStyle(p.foreground.color)
+                Text(agent.claudeMCPCommand)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(p.foreground.color)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: Radius.md, style: .continuous)
+                            .fill(p.input.color.opacity(0.5))
+                    )
+                HStack(spacing: 10) {
+                    Button("Copy command") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(agent.claudeMCPCommand, forType: .string)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(p.primary.color)
+                    Button("Regenerate token") {
+                        agent.regenerateToken()
+                    }
+                    .buttonStyle(.bordered)
+                    Spacer()
+                }
+                Text("Codex and other MCP clients use the same endpoint: \(agent.endpointURL) with an `Authorization: Bearer` header. The token is a per-machine secret and is never synced.")
+                    .font(Typography.ui(Typography.label))
+                    .foregroundStyle(p.mutedForeground.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func loadAssistantDrafts() {
