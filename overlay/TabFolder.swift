@@ -18,8 +18,15 @@ struct TabFolder: Identifiable, Equatable, Codable {
     /// (no tint, no card wash) for this folder.
     var colorHex: String?
 
+    /// When set, this is a **live folder** (Arc parity): its rows are links
+    /// fetched from an external source (RSS / GitHub), refreshed by
+    /// `LiveFolderStore`, not the open tabs in `tabIDs`.
+    var liveSource: LiveFolderSource?
+
     /// Sentinel `colorHex` meaning "no tint for this folder".
     static let noColor = "none"
+
+    var isLive: Bool { liveSource != nil }
 
     init(id: UUID = UUID(),
          name: String,
@@ -27,7 +34,8 @@ struct TabFolder: Identifiable, Equatable, Codable {
          isExpanded: Bool = true,
          tabIDs: [UUID] = [],
          isTidy: Bool = false,
-         colorHex: String? = nil) {
+         colorHex: String? = nil,
+         liveSource: LiveFolderSource? = nil) {
         self.id = id
         self.name = name
         self.symbol = symbol
@@ -35,14 +43,15 @@ struct TabFolder: Identifiable, Equatable, Codable {
         self.tabIDs = tabIDs
         self.isTidy = isTidy
         self.colorHex = colorHex
+        self.liveSource = liveSource
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, symbol, isExpanded, tabIDs, isTidy, colorHex
+        case id, name, symbol, isExpanded, tabIDs, isTidy, colorHex, liveSource
     }
 
-    // Custom decode so folders saved before `isTidy`/`colorHex` existed still
-    // load (synthesized Codable would throw on the missing keys).
+    // Custom decode so folders saved before `isTidy`/`colorHex`/`liveSource`
+    // existed still load (synthesized Codable would throw on the missing keys).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -52,5 +61,6 @@ struct TabFolder: Identifiable, Equatable, Codable {
         tabIDs = try c.decodeIfPresent([UUID].self, forKey: .tabIDs) ?? []
         isTidy = try c.decodeIfPresent(Bool.self, forKey: .isTidy) ?? false
         colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex)
+        liveSource = try c.decodeIfPresent(LiveFolderSource.self, forKey: .liveSource)
     }
 }

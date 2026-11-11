@@ -113,6 +113,11 @@ struct RootView: View {
             ImportPanelOverlay(store: store)
                 .ignoresSafeArea()
         }
+        // "New live folder" (Arc live-folder parity).
+        .overlay {
+            LiveFolderPanelOverlay(store: store)
+                .ignoresSafeArea()
+        }
         // Transient Peek preview (Little Arc-style link glance).
         .overlay {
             PeekOverlay(store: store)

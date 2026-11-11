@@ -207,6 +207,9 @@ private struct SidebarContextMenu: View {
         Button("Add New Folder") {
             store.addFolderForEditing()
         }
+        Button("Add Live Folder…") {
+            store.presentLiveFolderPanel()
+        }
         Button("Tidy Tabs") {
             store.tidyTabs()
         }
@@ -654,6 +657,7 @@ private struct FolderRow: View {
     @Environment(\.palette) private var p
     @Environment(\.colorScheme) private var scheme
     @ObservedObject private var settings = BrowserSettings.shared
+    @ObservedObject private var liveStore = LiveFolderStore.shared
     @State private var hovering = false
     @State private var headerDropTargeted = false
     @State private var isEditing = false
@@ -764,6 +768,24 @@ private struct FolderRow: View {
                 }
 
                 Spacer(minLength: 4)
+
+                if folder.isLive {
+                    if liveStore.refreshing.contains(folder.id) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.7)
+                            .frame(width: 20, height: 20)
+                    } else if hovering {
+                        Button { store.refreshLiveFolder(folder.id) } label: {
+                            Icon(name: "arrow.clockwise", size: 12, weight: .semibold)
+                                .foregroundStyle(p.mutedForeground.color)
+                                .frame(width: 20, height: 20)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Refresh now")
+                    }
+                }
             }
             .padding(.horizontal, 9)
             .frame(height: 32)
@@ -775,53 +797,66 @@ private struct FolderRow: View {
             .onTapGesture { if !isEditing { store.toggleFolder(folder.id) } }
             .onHover { hovering = $0 }
             .contextMenu {
-                Button("Rename") { beginRename() }
-                if !folder.isTidy {
+                if folder.isLive {
+                    Button("Rename") { beginRename() }
                     Button("Change Icon…") { showIconPicker = true }
-                }
-                Menu("Color") {
-                    Button {
-                        store.setFolderColor(folder.id, hex: nil)
-                    } label: {
-                        if folder.colorHex == nil {
-                            Label("From Tab Icon", systemImage: "checkmark")
-                        } else {
-                            Text("From Tab Icon")
-                        }
-                    }
-                    Button {
-                        store.setFolderColor(folder.id, hex: TabFolder.noColor)
-                    } label: {
-                        if folder.colorHex == TabFolder.noColor {
-                            Label("No Color", systemImage: "checkmark")
-                        } else {
-                            Text("No Color")
-                        }
+                    Button("Refresh Now") { store.refreshLiveFolder(folder.id) }
+                    Button("Copy All Links as Markdown") {
+                        store.copyLiveFolderLinksAsMarkdown(folder.id)
                     }
                     Divider()
-                    ForEach(FolderRow.colorChoices, id: \.hex) { choice in
+                    Button("Remove Folder", role: .destructive) {
+                        store.deleteFolder(folder.id)
+                    }
+                } else {
+                    Button("Rename") { beginRename() }
+                    if !folder.isTidy {
+                        Button("Change Icon…") { showIconPicker = true }
+                    }
+                    Menu("Color") {
                         Button {
-                            store.setFolderColor(folder.id, hex: choice.hex)
+                            store.setFolderColor(folder.id, hex: nil)
                         } label: {
-                            if folder.colorHex == choice.hex {
-                                Label(choice.name, systemImage: "checkmark")
+                            if folder.colorHex == nil {
+                                Label("From Tab Icon", systemImage: "checkmark")
                             } else {
-                                Text(choice.name)
+                                Text("From Tab Icon")
+                            }
+                        }
+                        Button {
+                            store.setFolderColor(folder.id, hex: TabFolder.noColor)
+                        } label: {
+                            if folder.colorHex == TabFolder.noColor {
+                                Label("No Color", systemImage: "checkmark")
+                            } else {
+                                Text("No Color")
+                            }
+                        }
+                        Divider()
+                        ForEach(FolderRow.colorChoices, id: \.hex) { choice in
+                            Button {
+                                store.setFolderColor(folder.id, hex: choice.hex)
+                            } label: {
+                                if folder.colorHex == choice.hex {
+                                    Label(choice.name, systemImage: "checkmark")
+                                } else {
+                                    Text(choice.name)
+                                }
                             }
                         }
                     }
-                }
-                Button("New Tab in Folder") {
-                    let tab = store.newTab()
-                    store.addTab(tab.id, toFolder: folder.id)
-                }
-                Divider()
-                Button("Separate Tabs") { store.separateFolderTabs(folder.id) }
-                Button("Duplicate") { store.duplicateFolder(folder.id) }
-                Button("Copy All Links as Markdown") { store.copyFolderLinksAsMarkdown(folder.id) }
-                Divider()
-                Button("Close Folder & Tabs", role: .destructive) {
-                    store.closeFolderAndTabs(folder.id)
+                    Button("New Tab in Folder") {
+                        let tab = store.newTab()
+                        store.addTab(tab.id, toFolder: folder.id)
+                    }
+                    Divider()
+                    Button("Separate Tabs") { store.separateFolderTabs(folder.id) }
+                    Button("Duplicate") { store.duplicateFolder(folder.id) }
+                    Button("Copy All Links as Markdown") { store.copyFolderLinksAsMarkdown(folder.id) }
+                    Divider()
+                    Button("Close Folder & Tabs", role: .destructive) {
+                        store.closeFolderAndTabs(folder.id)
+                    }
                 }
             }
             // Dropping onto the header appends the tab and expands the folder.
@@ -831,8 +866,11 @@ private struct FolderRow: View {
                 store: store,
                 isTargeted: $headerDropTargeted))
 
-            // Nested tabs.
+            // Nested tabs (or live links, for a live folder).
             if folder.isExpanded {
+              if folder.isLive {
+                liveChildren
+              } else {
                 ForEach(Array(childTabs.enumerated()), id: \.element.id) { idx, tab in
                     TabRow(
                         tab: tab,
@@ -868,6 +906,7 @@ private struct FolderRow: View {
                         splitTargetID: tab.id,
                         splitHover: $splitDropTargetID))
                 }
+              }
             }
         }
         // Dia-style group card: the whole block (header + tabs) sits on a wash
@@ -892,6 +931,35 @@ private struct FolderRow: View {
     /// Subtle in light mode, a touch stronger in dark so the wash still reads.
     private var cardOpacity: Double { scheme == .dark ? 0.24 : 0.16 }
 
+    /// Rows for a live folder: fetched links, or a refreshing / error / empty
+    /// placeholder. Clicking a link opens it in a new tab.
+    @ViewBuilder private var liveChildren: some View {
+        let list = Array((liveStore.items[folder.id] ?? [])
+            .prefix(folder.liveSource?.limit ?? 20))
+        if list.isEmpty {
+            HStack(spacing: 6) {
+                if liveStore.refreshing.contains(folder.id) {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                    Text("Refreshing…")
+                } else if let err = liveStore.errors[folder.id] {
+                    Icon(name: "exclamationmark.triangle", size: 11)
+                    Text(err).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("No items yet")
+                }
+            }
+            .font(Typography.ui(Typography.label))
+            .foregroundStyle(p.mutedForeground.color)
+            .padding(.leading, 18).padding(.trailing, 9).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ForEach(list) { item in
+                LiveItemRow(item: item) { store.openLiveItem(item) }
+                    .padding(.leading, 16)
+            }
+        }
+    }
+
     private func beginRenameIfRequested() {
         guard store.folderIDPendingRename == folder.id else { return }
         beginRename()
@@ -909,6 +977,48 @@ private struct FolderRow: View {
         let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         store.renameFolder(folder.id, to: trimmed.isEmpty ? "Folder" : trimmed)
         isEditing = false
+    }
+}
+
+/// One link row inside a live folder: favicon + title + dim subtitle. Opens in a
+/// new tab on click (Arc live-folder parity).
+private struct LiveItemRow: View {
+    let item: LiveFolderItem
+    let onOpen: () -> Void
+    @Environment(\.palette) private var p
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Favicon(icon: nil, page: item.url, size: 15)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.title)
+                    .font(Typography.ui(Typography.base))
+                    .foregroundStyle(p.sidebarForeground.color)
+                    .lineLimit(1)
+                if let sub = item.subtitle, !sub.isEmpty {
+                    Text(sub)
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: Radius.lg, style: .continuous)
+            .fill(hovering ? p.foreground.color.opacity(0.05) : .clear))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+        .onHover { hovering = $0 }
+        .help(item.url)
+        .contextMenu {
+            Button("Open") { onOpen() }
+            Button("Copy Link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(item.url, forType: .string)
+            }
+        }
     }
 }
 

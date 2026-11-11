@@ -409,7 +409,7 @@
  import("//build/config/buildflags_paint_preview.gni")
  import("//build/config/chrome_build.gni")
  import("//build/config/compiler/compiler.gni")
-@@ -2538,3 +2539,107 @@
+@@ -2538,3 +2539,109 @@
      ]
    }
  }
@@ -457,6 +457,8 @@
 +      "mori/ImportPanel.swift",
 +      "mori/LauncherOverlay.swift",
 +      "mori/LibraryPanel.swift",
++      "mori/LiveFolderPanel.swift",
++      "mori/LiveFolderStore.swift",
 +      "mori/MediaAgentScripts.swift",
 +      "mori/MediaController.swift",
 +      "mori/MediaPlayer.swift",

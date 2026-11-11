@@ -88,6 +88,8 @@ final class BrowserStore: ObservableObject {
     var boostEditorHost: String = ""
     /// The "Import from your old browser" overlay.
     @Published var importPanelVisible: Bool = false
+    /// The "New live folder" overlay (Arc live-folder parity).
+    @Published var liveFolderPanelVisible: Bool = false
     /// True while the click-to-zap element picker is armed on the active page.
     @Published var zapModeActive: Bool = false
     /// Ephemeral tab shown in the Peek overlay (Little Arc-style transient
@@ -367,6 +369,8 @@ final class BrowserStore: ObservableObject {
             // Begin Sparkle background update checks (no-op in unsigned dev builds
             // with no appcast configured).
             MillieUpdater.shared.start()
+            // Begin live-folder polling (RSS / GitHub), across all Spaces.
+            LiveFolderStore.shared.start(provider: { [weak self] in self?.allFolders ?? [] })
         }
     }
 
@@ -1791,6 +1795,35 @@ final class BrowserStore: ObservableObject {
         return folder
     }
 
+    /// Create an Arc-style **live folder** whose rows auto-refresh from `source`
+    /// (RSS / GitHub). Triggers an immediate fetch.
+    @discardableResult
+    func addLiveFolder(name: String, source: LiveFolderSource) -> TabFolder {
+        let folder = TabFolder(name: name, symbol: source.kind.symbol,
+                               isExpanded: true, liveSource: source)
+        withAnimation(Motion.snappy) { folders.append(folder) }
+        scheduleSessionSave()
+        LiveFolderStore.shared.refresh(folder)
+        return folder
+    }
+
+    /// Open a live folder's link in a new tab.
+    func openLiveItem(_ item: LiveFolderItem) {
+        newTab(url: item.url, select: true)
+    }
+
+    /// Manually refresh a live folder now (active Space).
+    func refreshLiveFolder(_ folderID: TabFolder.ID) {
+        guard let folder = folders.first(where: { $0.id == folderID }) else { return }
+        LiveFolderStore.shared.refresh(folder)
+    }
+
+    /// Every folder across all Spaces — feeds the live-folder poller.
+    var allFolders: [TabFolder] { contexts.flatMap(\.folders) }
+
+    func presentLiveFolderPanel() { liveFolderPanelVisible = true }
+    func dismissLiveFolderPanel() { liveFolderPanelVisible = false }
+
     /// Dissolve all "Tidy Tabs" groups in the active Space: their tabs return to
     /// the loose list and the temporary groups are removed. (Permanent, user-made
     /// folders are never touched.)
@@ -1873,6 +1906,7 @@ final class BrowserStore: ObservableObject {
         withAnimation(Motion.snappy) {
             folders.removeAll { $0.id == folderID }
         }
+        LiveFolderStore.shared.forget(folderID)
         scheduleSessionSave()
     }
 
@@ -1918,6 +1952,21 @@ final class BrowserStore: ObservableObject {
             return "- [\(title)](\(superCleaned(t.urlString)))"
         }
         guard !lines.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(lines.joined(separator: "\n"), forType: .string)
+        ToastCenter.shared.show("\(lines.count) link\(lines.count == 1 ? "" : "s") copied",
+                                icon: "doc.on.doc", style: .success)
+    }
+
+    /// Copy a live folder's current links as a Markdown list.
+    func copyLiveFolderLinksAsMarkdown(_ folderID: TabFolder.ID) {
+        let items = LiveFolderStore.shared.items[folderID] ?? []
+        let lines = items.map { "- [\($0.title)](\(superCleaned($0.url)))" }
+        guard !lines.isEmpty else {
+            ToastCenter.shared.show("Nothing to copy yet", icon: "xmark", style: .warning)
+            return
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(lines.joined(separator: "\n"), forType: .string)
