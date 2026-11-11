@@ -133,6 +133,8 @@ struct Omnibox: View {
 
             ReaderButton(store: store, tab: tab)
 
+            SiteNoteButton(tab: tab)
+
             CopyLinkButton(store: store, tab: tab)
 
             if tab.isLoading {
