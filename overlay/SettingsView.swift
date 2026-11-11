@@ -49,7 +49,7 @@ struct SettingsView: View {
             case .search: return "search engine google duckduckgo bing brave custom URL suggestions online queries"
             case .privacy: return "block ads trackers dangerous sites phishing malware history browsing data super copy clean link tracking utm"
             case .tabs: return "sleep idle archive keyboard shortcuts ctrl tab cycle recently used"
-            case .appearance: return "theme light dark system sidebar pinned labels folders color gradient peek"
+            case .appearance: return "theme light dark system sidebar pinned labels folders color gradient peek preview hover glance"
             case .profiles: return "profiles cookies logins history extensions isolation"
             case .sync: return "sync sign in out email code primary follower resync devices"
             case .ai: return "assistant codex anthropic claude openai gpt gemini key model page sharing"
@@ -491,6 +491,19 @@ struct SettingsView: View {
                         .font(Typography.ui(Typography.base))
                         .foregroundStyle(p.foreground.color)
                     Text("Links that open a new tab preview in a floating Peek instead. Esc closes, ⌘↩ opens as a tab.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                }
+            }
+
+            Hairline().opacity(0.5)
+
+            ToggleRow(isOn: $settings.previewOnHover) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Preview pinned sites on hover")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text("Hover a pinned tab to glance at a live preview of the page without switching to it.")
                         .font(Typography.ui(Typography.label))
                         .foregroundStyle(p.mutedForeground.color)
                 }

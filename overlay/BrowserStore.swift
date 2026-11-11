@@ -95,6 +95,9 @@ final class BrowserStore: ObservableObject {
     /// Ephemeral tab shown in the Peek overlay (Little Arc-style transient
     /// preview). Not a member of any context until promoted.
     @Published var peekTab: BrowserTab?
+    /// Ephemeral tab backing the sidebar hover **preview** popover (Arc
+    /// "Previews"). A live glance of a pinned site; torn down on hover-out.
+    @Published var previewTab: BrowserTab?
     /// Active custom context menu for a right-clicked link/image, if any.
     @Published var contextMenu: WebContextMenuRequest?
     /// True while the drag-to-select screenshot region picker is armed.

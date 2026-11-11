@@ -58,6 +58,31 @@ extension BrowserStore {
         MoriPrivacy.warmupSpareRenderer()
     }
 
+    /// Show a live hover **preview** of a pinned site (Arc "Previews"). Loads the
+    /// URL in a transient tab hosted in the sidebar popover. No-op if the same
+    /// URL is already previewing. Torn down by `closePreview()` on hover-out.
+    func showPreview(url rawURL: String, profileKey: String? = nil) {
+        let resolved = URLInterpreter.resolve(rawURL, settings: settings)
+        guard BrowserURLPolicy.isWebURL(resolved) else { return }
+        if let existing = previewTab, existing.urlString == resolved { return }
+        let target = MoriURLRewriter.rewrite(resolved)
+        let tab = BrowserTab(url: target, title: "Preview",
+                             profileKey: profileKey ?? activeProfileKey)
+        // Links inside a preview just re-point the preview (never spawn tabs).
+        tab.onRequestNewTab = { [weak self] u in self?.showPreview(url: u, profileKey: profileKey) }
+        tab.realize()
+        tab.markAccessed()
+        if let old = previewTab { DispatchQueue.main.async { old.close() } }
+        previewTab = tab
+    }
+
+    /// Tear down the hover preview (hover-out / tile change).
+    func closePreview() {
+        guard let tab = previewTab else { return }
+        previewTab = nil
+        DispatchQueue.main.async { tab.close() }
+    }
+
     /// Peek the clipboard's URL if it holds one, else the current page — the
     /// classic "I just copied a link, let me glance at it" flow.
     func peekFromClipboardOrCurrent() {
@@ -357,7 +382,7 @@ private final class PeekHostView: NSView {
     }
 }
 
-private struct PeekWebHost: NSViewRepresentable {
+struct PeekWebHost: NSViewRepresentable {
     @ObservedObject var tab: BrowserTab
     var cornerRadius: CGFloat = 0
 

@@ -90,6 +90,12 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(autoDevToolsOnLocalhost, forKey: Key.autoDevToolsOnLocalhost) }
     }
 
+    /// Arc "Previews": hovering a pinned site in the sidebar shows a live glance
+    /// of the page in a popover.
+    @Published var previewOnHover: Bool {
+        didSet { defaults.set(previewOnHover, forKey: Key.previewOnHover) }
+    }
+
     /// Set once the first-run welcome tour has been dismissed with "Don't show
     /// this again". Gates the tour on launch; reopenable from Settings.
     @Published var welcomeSeen: Bool {
@@ -293,6 +299,7 @@ final class BrowserSettings: ObservableObject {
         static let safeBrowsing = "mori.safeBrowsing"
         static let superCopyStripsTracking = "mori.superCopyStripsTracking"
         static let autoDevToolsOnLocalhost = "mori.autoDevToolsOnLocalhost"
+        static let previewOnHover = "mori.previewOnHover"
         static let welcomeSeen = "mori.welcomeSeen"
         static let aiIntegrationEnabled = "mori.aiIntegrationEnabled"
         static let sharesPageWithAI = "mori.sharesPageWithAI"
@@ -339,6 +346,7 @@ final class BrowserSettings: ObservableObject {
         safeBrowsingEnabled = defaults.object(forKey: Key.safeBrowsing) as? Bool ?? true
         superCopyStripsTracking = defaults.object(forKey: Key.superCopyStripsTracking) as? Bool ?? true
         autoDevToolsOnLocalhost = defaults.object(forKey: Key.autoDevToolsOnLocalhost) as? Bool ?? false
+        previewOnHover = defaults.object(forKey: Key.previewOnHover) as? Bool ?? true
         welcomeSeen = defaults.object(forKey: Key.welcomeSeen) as? Bool ?? false
         aiIntegrationEnabled = defaults.object(forKey: Key.aiIntegrationEnabled) as? Bool ?? true
         sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
@@ -386,7 +394,7 @@ final class BrowserSettings: ObservableObject {
     static var syncedDefaultsKeys: [String] {
         [Key.homepage, Key.newTab, Key.engine, Key.customEngine, Key.blockAds,
          Key.safeBrowsing, Key.superCopyStripsTracking, Key.autoDevToolsOnLocalhost,
-         Key.aiIntegrationEnabled, Key.sharesPageWithAI,
+         Key.previewOnHover, Key.aiIntegrationEnabled, Key.sharesPageWithAI,
          Key.theme, Key.sidebarOnLaunch, Key.sidebarPosition, Key.sidebarWidth,
          Key.gradientTheme, Key.autoPiP, Key.autoSleepMinutes, Key.splitRatio,
          Key.pinnedTabLabels, Key.tintedFolderCards, Key.peekPinnedLinks, Key.webPanels,

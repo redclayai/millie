@@ -406,6 +406,7 @@ private struct PinnedGrid: View {
 
             ForEach(Array(store.pinnedTabs.enumerated()), id: \.element.id) { idx, tab in
                 PinnedTile(
+                    store: store,
                     tab: tab,
                     isSelected: tab.id == store.selectedTabID,
                     onSelect: { store.selectTab(tab.id) }
@@ -440,6 +441,7 @@ private struct PinnedGrid: View {
 
 private struct PinnedTile: View {
     @ObservedObject private var settings = BrowserSettings.shared
+    @ObservedObject var store: BrowserStore
     @ObservedObject var tab: BrowserTab
     let isSelected: Bool
     let onSelect: () -> Void
@@ -448,6 +450,8 @@ private struct PinnedTile: View {
     @Environment(\.colorScheme) private var scheme
     @State private var hovering = false
     @State private var pressing = false
+    @State private var showPreview = false
+    @State private var previewWork: DispatchWorkItem?
 
     var body: some View {
         HStack(spacing: 9) {
@@ -480,7 +484,14 @@ private struct PinnedTile: View {
             .pressShrink(perform: onSelect) { isPressing in
                 pressing = isPressing
             }
-            .onHover { hovering = $0 }
+            .onHover { inside in
+                hovering = inside
+                handleHoverForPreview(inside)
+            }
+            .popover(isPresented: $showPreview, arrowEdge: .trailing) {
+                PinnedPreviewCard(store: store)
+            }
+            .onDisappear { cancelPreview() }
             .focusable()
             .onKeyPress(.return) { onSelect(); return .handled }
             .onKeyPress(.space) { onSelect(); return .handled }
@@ -497,6 +508,54 @@ private struct PinnedTile: View {
         if isSelected || pressing { return TabSurface.selectedFill(scheme) }
         if hovering { return TabSurface.hoverFill(scheme) }
         return TabSurface.tileRestFill(scheme)
+    }
+
+    // MARK: Hover preview (Arc "Previews")
+
+    /// Open a live preview after a short hover dwell; tear it down on hover-out.
+    /// The dwell keeps a quick pass over the tiles from spawning renderers.
+    private func handleHoverForPreview(_ inside: Bool) {
+        previewWork?.cancel()
+        guard settings.previewOnHover, BrowserURLPolicy.isWebURL(tab.urlString) else {
+            if !inside { cancelPreview() }
+            return
+        }
+        if inside {
+            let work = DispatchWorkItem {
+                store.showPreview(url: tab.urlString, profileKey: tab.profileKey)
+                showPreview = true
+            }
+            previewWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: work)
+        } else {
+            cancelPreview()
+        }
+    }
+
+    private func cancelPreview() {
+        previewWork?.cancel()
+        previewWork = nil
+        if showPreview { showPreview = false }
+        store.closePreview()
+    }
+}
+
+/// The sidebar hover-preview popover: a live glance of a pinned site.
+private struct PinnedPreviewCard: View {
+    @ObservedObject var store: BrowserStore
+    @Environment(\.palette) private var p
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Group {
+            if let tab = store.previewTab {
+                PeekWebHost(tab: tab, cornerRadius: Radius.md)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(width: 420, height: 520)
+        .background(p.card.color)
     }
 }
 
