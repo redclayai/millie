@@ -16,12 +16,18 @@ struct SettingsView: View {
     @State private var settingsQuery = ""
 
     private enum Category: String, CaseIterable, Identifiable {
+        case all = "All"
         case general = "General", search = "Search", privacy = "Privacy", tabs = "Tabs"
         case appearance = "Appearance", profiles = "Profiles", sync = "Sync", ai = "AI"
         case routing = "Routing", media = "Media", extensions = "Extensions", about = "About"
         var id: String { rawValue }
+
+        /// Every real section (excludes the "All" aggregate view).
+        static var realCategories: [Category] { allCases.filter { $0 != .all } }
+
         var symbol: String {
             switch self {
+            case .all: return "square.grid.2x2"
             case .general: return "gearshape"
             case .search: return "magnifyingglass"
             case .privacy: return "hand.raised"
@@ -38,9 +44,10 @@ struct SettingsView: View {
         }
         var keywords: String {
             switch self {
-            case .general: return "homepage new tab import welcome tour setup"
+            case .all: return "all everything every section overview"
+            case .general: return "homepage new tab import welcome tour setup developer devtools localhost inspect"
             case .search: return "search engine google duckduckgo bing brave custom URL suggestions online queries"
-            case .privacy: return "block ads trackers dangerous sites phishing malware history browsing data"
+            case .privacy: return "block ads trackers dangerous sites phishing malware history browsing data super copy clean link tracking utm"
             case .tabs: return "sleep idle archive keyboard shortcuts ctrl tab cycle recently used"
             case .appearance: return "theme light dark system sidebar pinned labels folders color gradient peek"
             case .profiles: return "profiles cookies logins history extensions isolation"
@@ -56,8 +63,11 @@ struct SettingsView: View {
 
     private var matchingCategories: [Category] {
         let terms = settingsQuery.lowercased().split(whereSeparator: \.isWhitespace)
-        guard !terms.isEmpty else { return [selectedCategory] }
-        return Category.allCases.filter { category in
+        guard !terms.isEmpty else {
+            // "All" expands to every real section stacked; others show just one.
+            return selectedCategory == .all ? Category.realCategories : [selectedCategory]
+        }
+        return Category.realCategories.filter { category in
             let text = category.rawValue.lowercased() + " " + category.keywords
             return terms.allSatisfy { text.contains($0) }
         }
@@ -130,6 +140,10 @@ struct SettingsView: View {
 
     @ViewBuilder private func categoryContent(_ category: Category) -> some View {
         switch category {
+        case .all:
+            // Unreachable: matchingCategories expands .all into realCategories
+            // before this is called. Present only to keep the switch exhaustive.
+            EmptyView()
         case .general: generalSection
         case .search: searchSection
         case .privacy: privacySection
@@ -272,6 +286,20 @@ struct SettingsView: View {
                 .font(Typography.ui(Typography.base, weight: .medium))
                 .foregroundStyle(p.primary.color)
             }
+
+            Hairline().opacity(0.5)
+
+            ToggleRow(isOn: $settings.autoDevToolsOnLocalhost) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Auto-open DevTools on localhost")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text("Open developer tools automatically when a tab loads a local development server (localhost, 127.0.0.1, .localhost, .test).")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -328,6 +356,20 @@ struct SettingsView: View {
                         .font(Typography.ui(Typography.base))
                         .foregroundStyle(p.foreground.color)
                     Text("Warn before loading known phishing or malware sites, using Millie's offline blocklist. No browsing data leaves your device.")
+                        .font(Typography.ui(Typography.label))
+                        .foregroundStyle(p.mutedForeground.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Hairline().opacity(0.5)
+
+            ToggleRow(isOn: $settings.superCopyStripsTracking) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Clean copied links")
+                        .font(Typography.ui(Typography.base))
+                        .foregroundStyle(p.foreground.color)
+                    Text("Strip tracking parameters (utm_…, click IDs, share tokens) when you copy a page link, so what you share stays clean.")
                         .font(Typography.ui(Typography.label))
                         .foregroundStyle(p.mutedForeground.color)
                         .fixedSize(horizontal: false, vertical: true)

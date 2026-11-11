@@ -78,6 +78,18 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(safeBrowsingEnabled, forKey: Key.safeBrowsing) }
     }
 
+    /// "Super Copy" (Arc parity): when copying a page/link, strip tracking query
+    /// params (`utm_*`, click IDs, share tokens) so the copied URL is clean.
+    @Published var superCopyStripsTracking: Bool {
+        didSet { defaults.set(superCopyStripsTracking, forKey: Key.superCopyStripsTracking) }
+    }
+
+    /// Developer convenience (Arc parity): auto-open DevTools when a tab lands on
+    /// a local development server (localhost / 127.0.0.1 / .localhost / .test).
+    @Published var autoDevToolsOnLocalhost: Bool {
+        didSet { defaults.set(autoDevToolsOnLocalhost, forKey: Key.autoDevToolsOnLocalhost) }
+    }
+
     /// Set once the first-run welcome tour has been dismissed with "Don't show
     /// this again". Gates the tour on launch; reopenable from Settings.
     @Published var welcomeSeen: Bool {
@@ -279,6 +291,8 @@ final class BrowserSettings: ObservableObject {
         static let customEngine = "mori.customSearchTemplate"
         static let blockAds = "mori.blockAds"
         static let safeBrowsing = "mori.safeBrowsing"
+        static let superCopyStripsTracking = "mori.superCopyStripsTracking"
+        static let autoDevToolsOnLocalhost = "mori.autoDevToolsOnLocalhost"
         static let welcomeSeen = "mori.welcomeSeen"
         static let aiIntegrationEnabled = "mori.aiIntegrationEnabled"
         static let sharesPageWithAI = "mori.sharesPageWithAI"
@@ -323,6 +337,8 @@ final class BrowserSettings: ObservableObject {
         onlineSearchSuggestions = defaults.object(forKey: Key.onlineSuggestions) as? Bool ?? false
         blockAds = defaults.object(forKey: Key.blockAds) as? Bool ?? true
         safeBrowsingEnabled = defaults.object(forKey: Key.safeBrowsing) as? Bool ?? true
+        superCopyStripsTracking = defaults.object(forKey: Key.superCopyStripsTracking) as? Bool ?? true
+        autoDevToolsOnLocalhost = defaults.object(forKey: Key.autoDevToolsOnLocalhost) as? Bool ?? false
         welcomeSeen = defaults.object(forKey: Key.welcomeSeen) as? Bool ?? false
         aiIntegrationEnabled = defaults.object(forKey: Key.aiIntegrationEnabled) as? Bool ?? true
         sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
@@ -369,7 +385,8 @@ final class BrowserSettings: ObservableObject {
     /// and are never synced).
     static var syncedDefaultsKeys: [String] {
         [Key.homepage, Key.newTab, Key.engine, Key.customEngine, Key.blockAds,
-         Key.safeBrowsing, Key.aiIntegrationEnabled, Key.sharesPageWithAI,
+         Key.safeBrowsing, Key.superCopyStripsTracking, Key.autoDevToolsOnLocalhost,
+         Key.aiIntegrationEnabled, Key.sharesPageWithAI,
          Key.theme, Key.sidebarOnLaunch, Key.sidebarPosition, Key.sidebarWidth,
          Key.gradientTheme, Key.autoPiP, Key.autoSleepMinutes, Key.splitRatio,
          Key.pinnedTabLabels, Key.tintedFolderCards, Key.peekPinnedLinks, Key.webPanels,

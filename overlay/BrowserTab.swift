@@ -68,6 +68,21 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     /// Traffic Control routing rules.
     var onDidNavigate: ((BrowserTab, String) -> Void)?
 
+    /// Tracks whether DevTools was auto-opened for the current run of localhost
+    /// navigation, so the store opens it once on entry (not on every in-site
+    /// navigation). Reset when the tab leaves localhost. See
+    /// `BrowserStore.maybeAutoOpenDevTools`.
+    var devToolsAutoOpenedForLocalhost = false
+
+    /// True when `urlString` points at a local development server — exactly
+    /// localhost / 127.0.0.1 / ::1, or a host ending in `.localhost` / `.test`.
+    static func isLocalDevHost(_ urlString: String) -> Bool {
+        guard var host = URLComponents(string: urlString)?.host?.lowercased() else { return false }
+        if host.hasPrefix("[") && host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" { return true }
+        return host.hasSuffix(".localhost") || host.hasSuffix(".test")
+    }
+
     /// Fired when a navigation is stopped because the destination is on the
     /// phishing/malware blocklist, so the store can raise the interstitial.
     var onThreatBlocked: ((BrowserTab, String) -> Void)?

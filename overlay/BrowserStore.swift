@@ -645,7 +645,9 @@ final class BrowserStore: ObservableObject {
             self?.scheduleSessionSave()
         }
         tab.onDidNavigate = { [weak self] tab, url in
-            self?.applyRouting(for: tab, url: url)
+            guard let self else { return }
+            self.applyRouting(for: tab, url: url)
+            self.maybeAutoOpenDevTools(for: tab, url: url)
         }
         tab.onThreatBlocked = { [weak self] tab, url in
             self?.presentThreatBlock(tab: tab, url: url)
@@ -1333,7 +1335,13 @@ final class BrowserStore: ObservableObject {
         else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(url, forType: .string)
+        pasteboard.setString(superCleaned(url), forType: .string)
+    }
+
+    /// "Super Copy": strip tracking params when the setting is on (default),
+    /// otherwise pass the URL through unchanged.
+    func superCleaned(_ url: String) -> String {
+        settings.superCopyStripsTracking ? URLCleaner.clean(url) : url
     }
 
     /// Copy the active tab's link to the clipboard, confirming with a toast.
@@ -1343,10 +1351,13 @@ final class BrowserStore: ObservableObject {
             ToastCenter.shared.show("No link to copy", icon: "xmark", style: .warning)
             return
         }
+        let cleaned = superCleaned(url)
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(url, forType: .string)
-        ToastCenter.shared.show("Link copied to clipboard", icon: "link", style: .success)
+        pasteboard.setString(cleaned, forType: .string)
+        let strippedTracking = cleaned != url
+        ToastCenter.shared.show(strippedTracking ? "Clean link copied" : "Link copied to clipboard",
+                                icon: "link", style: .success)
     }
 
     func closeOtherTabs(than id: BrowserTab.ID) {
@@ -1539,6 +1550,21 @@ final class BrowserStore: ObservableObject {
     func resetZoom() { selectedTab?.resetZoom() }
 
     func toggleDevTools() { selectedTab?.toggleDevTools() }
+
+    /// Auto-open DevTools when the *selected* tab lands on a local dev server
+    /// (localhost / 127.0.0.1 / .localhost / .test), once per entry into
+    /// localhost. Background and session-restore tabs are ignored so we never
+    /// spawn stray DevTools windows. Backs the "Auto-open DevTools on localhost"
+    /// setting (Arc Developer-mode parity).
+    private func maybeAutoOpenDevTools(for tab: BrowserTab, url: String) {
+        guard settings.autoDevToolsOnLocalhost, BrowserTab.isLocalDevHost(url) else {
+            tab.devToolsAutoOpenedForLocalhost = false
+            return
+        }
+        guard tab.id == selectedTabID, !tab.devToolsAutoOpenedForLocalhost else { return }
+        tab.devToolsAutoOpenedForLocalhost = true
+        tab.showDevTools()
+    }
     func printPage() { selectedTab?.printPage() }
 
     /// Toggle native macOS full-screen on the main browser window (Chrome's
@@ -1889,7 +1915,7 @@ final class BrowserStore: ObservableObject {
         let lines = folder.tabIDs.compactMap { id -> String? in
             guard let t = tab(for: id), !t.urlString.isEmpty else { return nil }
             let title = t.displayTitle.isEmpty ? t.urlString : t.displayTitle
-            return "- [\(title)](\(t.urlString))"
+            return "- [\(title)](\(superCleaned(t.urlString)))"
         }
         guard !lines.isEmpty else { return }
         let pb = NSPasteboard.general
