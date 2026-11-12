@@ -94,6 +94,13 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable {
     /// Hosts the user chose to visit despite a Safe Browsing block (per tab).
     var bypassedThreatHosts: Set<String> = []
 
+    /// Set while a Peek promote (⌘↩ / Split View) is retrying for a URL that
+    /// hasn't committed yet. Guards `promoteWhenReady` so mashing the control
+    /// during the retry window starts one retry chain, not one per press —
+    /// each extra press used to spawn its own chain that independently timed
+    /// out and toasted, stacking duplicate "still loading" pills.
+    var isPromotingPeek: Bool = false
+
     /// The native CEF-backed view. Created lazily on first `realize()` and
     /// recreated transparently after `sleep()` discards it to reclaim memory.
     /// Only ever touched for realized tabs, so reading it never forces an

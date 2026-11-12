@@ -711,11 +711,17 @@ final class BrowserStore: ObservableObject {
     // MARK: Tab management
 
     @discardableResult
-    func newTab(url: String? = nil, select: Bool = true) -> BrowserTab {
+    /// `profileKey` lets an engine-created tab (window.open / chrome.tabs.create,
+    /// routed here via MoriRoot.openNewTab) target the orphan's REAL originating
+    /// profile instead of silently adopting whatever Space is active right now —
+    /// nil (the default for ordinary manual "new tab" actions, which have no such
+    /// hint) keeps the original behavior of following the active Space.
+    func newTab(url: String? = nil, profileKey: String? = nil, select: Bool = true) -> BrowserTab {
         let initialURL = MoriURLRewriter.rewrite(url ?? settings.newTabURL)
-        // New tabs adopt the active Space's Profile (isolated storage).
+        // New tabs adopt the active Space's Profile (isolated storage) unless an
+        // explicit origin profile was handed through.
         let tab = makeTab(url: initialURL, title: "New Tab",
-                          profileKey: activeProfileKey)
+                          profileKey: profileKey ?? activeProfileKey)
         tabs.append(tab)
         addToActiveContext(tab.id)
         if select { selectTab(tab.id) }

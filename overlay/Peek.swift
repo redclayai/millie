@@ -154,13 +154,24 @@ extension BrowserStore {
     private func promoteWhenReady(_ tab: BrowserTab, attempt: Int = 0,
                                   _ open: @escaping (String) -> Void) {
         guard peekTab === tab else { return }   // peek closed/replaced while waiting
-        if let url = promotableURL(for: tab) { open(url); return }
+        // A press that lands while an earlier press is still retrying joins
+        // that chain instead of starting a second one (see isPromotingPeek).
+        if attempt == 0 {
+            if tab.isPromotingPeek { return }
+            tab.isPromotingPeek = true
+        }
+        if let url = promotableURL(for: tab) {
+            tab.isPromotingPeek = false
+            open(url)
+            return
+        }
         if attempt < 10 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.promoteWhenReady(tab, attempt: attempt + 1, open)
             }
             return
         }
+        tab.isPromotingPeek = false
         tracePeekNotReady(tab)
         warnPeekNotReady()
     }

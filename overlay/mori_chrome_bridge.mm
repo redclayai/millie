@@ -106,7 +106,7 @@
 + (BOOL)isReservedShortcutKeyEquivalent:(NSString*)keyEquivalent
                            modifierMask:(NSUInteger)modifierMask;
 + (void)newTab;
-+ (void)openNewTabWithURL:(NSString*)url;
++ (void)openNewTabWithURL:(NSString*)url profileKey:(NSString*)profileKey;
 + (BOOL)ownsRestoredTabWithURL:(NSString*)url profileKey:(NSString*)profileKey;
 + (void)openExternalSchemeWithURL:(NSString*)url;
 + (void)newWindow;
@@ -1092,7 +1092,18 @@ class MoriTabStripBridge : public TabStripModelObserver {
                   }, contents), base::Seconds(2));
               return;
             }
-            [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(s)];
+            // Hand the orphan's REAL originating profile through, so the
+            // Millie tab created to adopt it targets the matching Browser.
+            // Previously this call carried only the URL, so adoption fell
+            // back to whatever Space happened to be selected in the UI at
+            // the moment the orphan arrived — a mismatch there left the new
+            // tab's targetBrowser either wrong (orphan adoption silently
+            // fails, falls through to a fresh unrelated WebContents) or nil
+            // (MoriBrowserForProfileKey finds no Browser for the guessed key,
+            // maybeCreateTab bails out early, and the tab is permanently
+            // stuck with no WebContents at all — the "wc=0 forever" case).
+            [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(s)
+                              profileKey:base::SysUTF8ToNSString(key)];
           }, spec, profile_key, session_restore, wc->GetWeakPtr()));
     }
   }
@@ -1554,7 +1565,11 @@ static void FlushPendingExternalUrls(int attempts_left) {
     std::vector<std::string>& pending = PendingExternalUrls();
     const bool opened = !pending.empty();
     for (const std::string& spec : pending) {
-      [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(spec)];
+      // No originating WebContents here (these are OS-level "open with
+      // Millie" links, not engine-created popups), so there's no real
+      // profile to hand through — empty tells the Swift side to fall back
+      // to the active Space, same as before this parameter existed.
+      [MoriRoot openNewTabWithURL:base::SysUTF8ToNSString(spec) profileKey:@""];
     }
     pending.clear();
     if (opened && g_main_window) {

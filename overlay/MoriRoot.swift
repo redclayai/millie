@@ -241,10 +241,18 @@ final class MoriRoot: NSObject {
         shared?.store.ownsRestoredTab(url: url, profileKey: profileKey) ?? false
     }
 
-    @objc(openNewTabWithURL:)
-    static func openNewTab(url: String) {
+    @objc(openNewTabWithURL:profileKey:)
+    static func openNewTab(url: String, profileKey: String) {
         guard let store = shared?.store else { return }
         let target = url.isEmpty ? "about:blank" : url
+        // Empty means "no originating profile to honor" (a cold-launch
+        // external link); nil here falls back to the active Space, same as
+        // the pre-existing behavior. A non-empty key is the engine-created
+        // orphan's REAL profile and must win over whatever Space the user
+        // happens to have selected right now — otherwise peek()/newTab()
+        // target the wrong Browser and the orphan can never be adopted (see
+        // mori_chrome_bridge.mm's maybeCreateTab/claimMatching).
+        let originProfileKey: String? = profileKey.isEmpty ? nil : profileKey
         // Non-web links (mailto:, tel:, …) that arrive as engine-created tabs
         // (target=_blank / window.open) hand off to the OS instead of becoming
         // a blank Millie tab.
@@ -266,10 +274,10 @@ final class MoriRoot: NSObject {
         let fromPanel = NSApp.keyWindow is PanelChildWindow
         if store.settings.peekPinnedLinks, !fromPanel,
            let source = store.selectedTab, store.isPinned(source.id), peekable {
-            store.peek(url: target)
+            store.peek(url: target, profileKey: originProfileKey)
             return
         }
-        store.newTab(url: target, select: true)
+        store.newTab(url: target, profileKey: originProfileKey, select: true)
     }
     /// True once the SwiftUI root (and its store) exists, so openNewTabWithURL:
     /// will actually create a tab. Used by the external-URL handler to defer
