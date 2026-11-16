@@ -945,6 +945,12 @@ final class CodexBrowserAssistant: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// Tear down the private connection of a headless assistant (Browse for Me).
+    func shutdownHeadless() {
+        cancelTurnWatchdog()
+        connection.disconnect()
+    }
+
     private func disableAssistant() {
         let message = disabledMessage
         cancelTurnWatchdog()

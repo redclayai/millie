@@ -643,7 +643,8 @@ private struct LauncherView: View {
         ScrollView {
             VStack(spacing: LauncherMetrics.rowSpacing) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
-                    LauncherRow(item: item, isHighlighted: idx == highlighted, scheme: scheme) {
+                    LauncherRow(item: item, isHighlighted: idx == highlighted, scheme: scheme,
+                                showBrowseHint: idx == 0 && idx == highlighted && canBrowseForMe) {
                         activate(item)
                     }
                     .onHover { if $0 { highlighted = idx } }
@@ -712,9 +713,25 @@ private struct LauncherView: View {
 
     /// Tab pressed in the field: lock in a matching keyword as a chip.
     private func handleTab() -> Bool {
-        guard siteSearch == nil, let match = SiteSearch.match(query) else { return false }
-        activateSiteSearch(match)
+        if siteSearch == nil, let match = SiteSearch.match(query) {
+            activateSiteSearch(match)
+            return true
+        }
+        // Not a site keyword: Tab on a free-text query → Browse for Me.
+        guard canBrowseForMe else { return false }
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        store.dismissLauncher()
+        BrowseForMe.run(query: q, store: store)
         return true
+    }
+
+    /// Free-text query (not a URL, keyword chip, or attachment send) that
+    /// Browse for Me can act on.
+    private var canBrowseForMe: Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return siteSearch == nil && !hasAttachments && q.count >= 3
+            && SiteSearch.match(q) == nil
+            && !URLInterpreter.resolvesAsAddress(q)
     }
 
     /// Backspace in an empty field: dissolve the chip back into its keyword.
@@ -1246,6 +1263,7 @@ private struct LauncherRow: View {
     let item: LauncherItem
     let isHighlighted: Bool
     let scheme: ColorScheme
+    var showBrowseHint: Bool = false
     let action: () -> Void
 
     @Environment(\.palette) private var p
@@ -1276,6 +1294,22 @@ private struct LauncherRow: View {
                     .font(Typography.ui(Typography.base, weight: .regular))
                     .frame(maxWidth: 280, alignment: .trailing)
                     .layoutPriority(0)
+                }
+
+                if showBrowseHint {
+                    HStack(spacing: 5) {
+                        Text("Tab to")
+                            .foregroundStyle(p.mutedForeground.color)
+                        Text("Browse for Me").fontWeight(.semibold)
+                            .foregroundStyle(p.foreground.color)
+                        Icon(name: "arrow.right", size: 11, weight: .semibold)
+                            .foregroundStyle(p.foreground.color)
+                    }
+                    .font(Typography.ui(12, weight: .regular))
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule(style: .continuous).fill(p.foreground.color.opacity(0.08)))
+                    .layoutPriority(2)
+                    .transition(.opacity)
                 }
             }
             .padding(.horizontal, LauncherMetrics.rowInnerPadding)

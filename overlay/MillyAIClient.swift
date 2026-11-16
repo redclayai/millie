@@ -105,12 +105,33 @@ final class MillyAIClient {
         }
     }
 
+    /// One-shot completion with a caller-supplied system prompt (no page
+    /// context, no history). Cloud providers only — `.codex` has no HTTP path,
+    /// so callers must check `canComplete` first.
+    var canComplete: Bool {
+        let p = BrowserSettings.shared.assistantProvider
+        return p.needsKey && hasKey(for: p)
+    }
+
+    func complete(system: String, user: String, maxTokens: Int = 2500) async throws -> String {
+        let provider = BrowserSettings.shared.assistantProvider
+        let apiKey = key(for: provider)
+        guard provider.needsKey, !apiKey.isEmpty else { throw ClientError.noKey(provider) }
+        let model = BrowserSettings.shared.model(for: provider)
+        switch provider {
+        case .anthropic: return try await callAnthropic(apiKey, model, [], user, system: system, maxTokens: maxTokens)
+        case .openai:    return try await callOpenAI(apiKey, model, [], user, system: system, maxTokens: maxTokens)
+        case .gemini:    return try await callGemini(apiKey, model, [], user, system: system, maxTokens: maxTokens)
+        case .codex:     throw ClientError.noKey(provider)
+        }
+    }
+
     // MARK: Providers
 
-    private func callAnthropic(_ key: String, _ model: String, _ history: [Turn], _ user: String) async throws -> String {
+    private func callAnthropic(_ key: String, _ model: String, _ history: [Turn], _ user: String, system: String? = nil, maxTokens: Int? = nil) async throws -> String {
         var messages: [[String: Any]] = history.map { ["role": $0.role, "content": $0.text] }
         messages.append(["role": "user", "content": user])
-        let body: [String: Any] = ["model": model, "max_tokens": 1024, "system": systemPrompt, "messages": messages]
+        let body: [String: Any] = ["model": model, "max_tokens": maxTokens ?? 1024, "system": system ?? systemPrompt, "messages": messages]
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
         req.setValue(key, forHTTPHeaderField: "x-api-key")
@@ -122,11 +143,12 @@ final class MillyAIClient {
         return content?.compactMap { $0["text"] as? String }.joined() ?? "(no response)"
     }
 
-    private func callOpenAI(_ key: String, _ model: String, _ history: [Turn], _ user: String) async throws -> String {
-        var messages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
+    private func callOpenAI(_ key: String, _ model: String, _ history: [Turn], _ user: String, system: String? = nil, maxTokens: Int? = nil) async throws -> String {
+        var messages: [[String: Any]] = [["role": "system", "content": system ?? systemPrompt]]
         messages += history.map { ["role": $0.role, "content": $0.text] }
         messages.append(["role": "user", "content": user])
-        let body: [String: Any] = ["model": model, "messages": messages]
+        var body: [String: Any] = ["model": model, "messages": messages]
+        if let maxTokens { body["max_completion_tokens"] = maxTokens }
         var req = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
         req.httpMethod = "POST"
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -138,15 +160,16 @@ final class MillyAIClient {
         return msg ?? "(no response)"
     }
 
-    private func callGemini(_ key: String, _ model: String, _ history: [Turn], _ user: String) async throws -> String {
+    private func callGemini(_ key: String, _ model: String, _ history: [Turn], _ user: String, system: String? = nil, maxTokens: Int? = nil) async throws -> String {
         var contents: [[String: Any]] = history.map {
             ["role": $0.role == "assistant" ? "model" : "user", "parts": [["text": $0.text]]]
         }
         contents.append(["role": "user", "parts": [["text": user]]])
-        let body: [String: Any] = [
-            "systemInstruction": ["parts": [["text": systemPrompt]]],
+        var body: [String: Any] = [
+            "systemInstruction": ["parts": [["text": system ?? systemPrompt]]],
             "contents": contents,
         ]
+        if let maxTokens { body["generationConfig"] = ["maxOutputTokens": maxTokens] }
         // Key goes in a header, not the query string — URLs end up in
         // logs and proxies; headers don't.
         let url = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent"

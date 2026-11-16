@@ -409,7 +409,7 @@
  import("//build/config/buildflags_paint_preview.gni")
  import("//build/config/chrome_build.gni")
  import("//build/config/compiler/compiler.gni")
-@@ -2538,3 +2539,111 @@
+@@ -2538,3 +2539,112 @@
      ]
    }
  }
@@ -431,6 +431,7 @@
 +      "mori/BookmarkStore.swift",
 +      "mori/BoostStore.swift",
 +      "mori/Boosts.swift",
++      "mori/BrowseForMe.swift",
 +      "mori/BrowserAutomation.swift",
 +      "mori/BrowserContext.swift",
 +      "mori/BrowserImporter.swift",

@@ -59,9 +59,17 @@ final class SpeechDictation: ObservableObject {
         task?.cancel()
         task = nil
         request = nil
+        // Only touch the input node if a session actually installed a tap:
+        // `AVAudioEngine.inputNode` can block the main thread (audio-device
+        // query / pending mic permission), and stop() runs every time the
+        // launcher opens or closes — even when the mic was never used.
+        guard tapInstalled else { return }
         if audioEngine.isRunning { audioEngine.stop() }
         audioEngine.inputNode.removeTap(onBus: 0)
+        tapInstalled = false
     }
+
+    private var tapInstalled = false
 
     // MARK: - Internals
 
@@ -82,6 +90,7 @@ final class SpeechDictation: ObservableObject {
 
         // Capture the request locally (not self) so the audio-thread tap never
         // touches main-actor state.
+        tapInstalled = true
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
         }

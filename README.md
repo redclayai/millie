@@ -25,6 +25,7 @@ https://github.com/user-attachments/assets/fe9b30d7-ef4f-4c04-aeca-f21b305cf4c6
 - **Smart folders** — group tabs into folders that show each site's icon at a glance.
 - **Live folders** — folders that fill themselves from a source and refresh in the background: an RSS feed, or the open pull requests / issues on a GitHub repo. Your reading and your work queues, always current in the sidebar.
 - **Tidy Tabs** — one click closes duplicates and groups the rest by site.
+- **Browse for Me** — type a question in the command bar and press Tab. Millie searches the web, reads the top results, and opens a chat-style page with a cited answer, its sources, and a follow-up box. Runs on Local Codex or your own API key; served from a loopback-only page server.
 - **Site notes** — jot a note on any site from the address bar. It's filed by site, so it follows you across every page on that domain — running notes on a docs site, context on a dashboard, reminders on a client's app.
 
 ## Keep the tools you live in one click away
