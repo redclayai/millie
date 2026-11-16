@@ -57,6 +57,9 @@ final class UpdateNotifier: ObservableObject {
 
     /// Newer version available on GitHub (e.g. "2.27"), nil when up to date.
     @Published private(set) var availableVersion: String?
+    /// Plain-text release notes for `availableVersion`, from the appcast
+    /// `<description>`; nil when the feed carries none.
+    @Published private(set) var availableNotes: String?
 
     private var timer: Timer?
     private var dismissedVersion: String? =
@@ -100,9 +103,45 @@ final class UpdateNotifier: ObservableObject {
             as? String ?? "0"
         if Self.isVersion(latest, newerThan: current), latest != dismissedVersion {
             availableVersion = latest
+            availableNotes = Self.notes(forVersion: latest, inAppcast: xml)
         } else if !Self.isVersion(latest, newerThan: current) {
             availableVersion = nil
+            availableNotes = nil
         }
+    }
+
+    /// Release notes for `version`: that item's `<description>` (CDATA or plain
+    /// HTML) flattened to readable plain text.
+    static func notes(forVersion version: String, inAppcast xml: String) -> String? {
+        guard let items = try? NSRegularExpression(pattern: "<item>.*?</item>",
+                                                   options: [.dotMatchesLineSeparators]) else { return nil }
+        let ns = xml as NSString
+        for m in items.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
+            let item = ns.substring(with: m.range)
+            guard item.contains(">\(version)</sparkle:shortVersionString>")
+                    || item.contains("sparkle:shortVersionString=\"\(version)\"") else { continue }
+            guard let d = item.range(of: "<description>(.*?)</description>",
+                                     options: [.regularExpression, .caseInsensitive]) else { return nil }
+            var html = String(item[d])
+            html = html.replacingOccurrences(of: "<description>", with: "")
+                .replacingOccurrences(of: "</description>", with: "")
+                .replacingOccurrences(of: "<![CDATA[", with: "")
+                .replacingOccurrences(of: "]]>", with: "")
+            for (pat, rep) in [("(?i)<li[^>]*>", "• "), ("(?i)</(p|h[1-6]|ul|ol|div)>", "\n\n"),
+                               ("(?i)<br\\s*/?>|</li>", "\n"), ("<[^>]+>", "")] {
+                html = html.replacingOccurrences(of: pat, with: rep, options: .regularExpression)
+            }
+            for (k, v) in ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'"] {
+                html = html.replacingOccurrences(of: k, with: v)
+            }
+            let text = html.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // The popover already has a "What's new in Millie X" title.
+            let body = text.hasPrefix("Millie \(version)")
+                ? text.drop(while: { $0 != "\n" }).trimmingCharacters(in: .whitespacesAndNewlines) : text
+            return body.isEmpty ? nil : body
+        }
+        return nil
     }
 
     /// Highest `sparkle:shortVersionString` in the appcast (element or

@@ -1275,6 +1275,7 @@ private struct SidebarBottomBar: View {
     @ObservedObject var store: BrowserStore
     @ObservedObject private var settings = BrowserSettings.shared
     @ObservedObject private var updates = UpdateNotifier.shared
+    @State private var showUpdateNotes = false
     @Environment(\.palette) private var pal
 
     var body: some View {
@@ -1305,6 +1306,35 @@ private struct SidebarBottomBar: View {
                     .foregroundStyle(pal.mutedForeground.color)
             }
             Spacer(minLength: 4)
+            if let notes = updates.availableNotes {
+                Button { showUpdateNotes.toggle() } label: {
+                    Icon(name: "sparkles", size: 12, weight: .semibold)
+                        .foregroundStyle(pal.primary.color)
+                        .frame(width: 22, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("What’s new in Millie \(version)")
+                .popover(isPresented: $showUpdateNotes, arrowEdge: .top) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("What’s new in Millie \(version)")
+                            .font(Typography.ui(Typography.base, weight: .semibold))
+                        ScrollView {
+                            Text(notes)
+                                .font(Typography.ui(Typography.base))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 240)
+                        Button("Update now") {
+                            showUpdateNotes = false
+                            MillieUpdater.shared.checkForUpdates()
+                        }
+                    }
+                    .padding(14)
+                    .frame(width: 300)
+                }
+            }
             Button {
                 updates.dismiss()
             } label: {
