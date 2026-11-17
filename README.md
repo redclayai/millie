@@ -68,7 +68,7 @@ https://github.com/user-attachments/assets/fe9b30d7-ef4f-4c04-aeca-f21b305cf4c6
 
 ## Always current
 
-Millie updates itself automatically — security fixes included — so you're always on the latest. You can also check manually in **Settings → About → Check for Updates…**.
+Millie updates itself automatically — security fixes included — so you're always on the latest. You can also check manually in **Settings → About → Check for Updates…**. When an update is waiting, the sidebar banner has a sparkles button that shows **What's new** for that release before you install; click **Update now** right from the popover.
 
 ---
 
