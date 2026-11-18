@@ -79,6 +79,14 @@ ALLOWLIST = {
     "intercom.io",      # support chat widgets + app.intercom.io
     "datadoghq.com",
     "tableau.com",
+    # Intercom Messenger infra hosts individually listed in the ads feed. These
+    # are load-bearing for the chat widget's boot/runtime, not ad/tracker hosts,
+    # so the widget silently fails to render when they're blocked (observed on
+    # fcm-dev.bluesageusa.com, 2026-11-18). Intercom's genuine trackers
+    # (via.intercom.io link-click redirector, intercom-clicks.com, analytics.*,
+    # status/engineering/etc.) are deliberately left blocked.
+    "api-ping.intercom.io",  # Messenger boot/ping endpoint
+    "api.intercom.io",       # Intercom API host used by the widget
 }
 
 
