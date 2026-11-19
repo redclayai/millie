@@ -144,6 +144,15 @@ final class BrowserSettings: ObservableObject {
         didSet { defaults.set(assistantProvider.rawValue, forKey: Key.assistantProvider) }
     }
 
+    /// Explicit path to the `codex` CLI for the local Codex provider. Empty =
+    /// auto-detect. Machine-specific (like the agent token), so it is never
+    /// synced across Macs; a Finder-launched app can't see your shell PATH, so
+    /// this lets users point Millie straight at their codex when it lives
+    /// somewhere non-standard (nvm, Volta, a custom prefix).
+    @Published var codexBinaryPath: String {
+        didSet { defaults.set(codexBinaryPath, forKey: Key.codexBinaryPath) }
+    }
+
     /// Editable model per BYO provider (defaults to the provider's default).
     func model(for p: AIProvider) -> String {
         let v = defaults.string(forKey: "mori.model.\(p.rawValue)") ?? ""
@@ -330,6 +339,7 @@ final class BrowserSettings: ObservableObject {
         static let agentServerToken = "mori.agentServerToken"
         static let sharesPageWithAI = "mori.sharesPageWithAI"
         static let assistantProvider = "mori.assistantProvider"
+        static let codexBinaryPath = "mori.codexBinaryPath"
         static let theme = "mori.theme"
         static let sidebarOnLaunch = "mori.showSidebarOnLaunch"
         static let sidebarPosition = "mori.sidebarPosition"
@@ -380,6 +390,7 @@ final class BrowserSettings: ObservableObject {
         agentServerToken = defaults.string(forKey: Key.agentServerToken) ?? ""
         sharesPageWithAI = defaults.object(forKey: Key.sharesPageWithAI) as? Bool ?? true
         assistantProvider = AIProvider(rawValue: defaults.string(forKey: Key.assistantProvider) ?? "") ?? .codex
+        codexBinaryPath = defaults.string(forKey: Key.codexBinaryPath) ?? ""
         theme = ThemePreference(rawValue: defaults.string(forKey: Key.theme) ?? "")
             ?? .system
         // Default the sidebar on (matches the Millie default chrome).

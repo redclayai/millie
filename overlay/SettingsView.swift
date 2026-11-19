@@ -410,6 +410,17 @@ struct SettingsView: View {
                          options: AIProvider.allCases) { $0.label }
             }
 
+            if settings.assistantProvider == .codex {
+                Field(label: "Codex CLI path") {
+                    SettingTextField(text: $settings.codexBinaryPath,
+                                     placeholder: "/opt/homebrew/bin/codex")
+                }
+                Text("Optional — leave blank to auto-detect (Homebrew, npm, bun, nvm, fnm, Volta). If Ask Milly can't find Codex, run `which codex` in Terminal and paste the full path here. Requires the Codex CLI installed and signed in.")
+                    .font(Typography.ui(Typography.label))
+                    .foregroundStyle(p.mutedForeground.color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if settings.assistantProvider.needsKey {
                 Field(label: "API key") {
                     SettingSecureField(text: $apiKeyDraft,

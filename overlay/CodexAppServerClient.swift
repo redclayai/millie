@@ -1273,7 +1273,10 @@ enum CodexAppServerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .codexBinaryMissing:
-            return "Could not find the codex CLI. Install Codex or set CODEX_BIN."
+            return "Couldn't find the Codex CLI. Open Settings → AI and set the "
+                + "\u{201C}Codex CLI path\u{201D} (run `which codex` in Terminal to get it), "
+                + "or switch Ask Milly to a provider with your own key. "
+                + "If you haven't installed Codex yet, do that first."
         case .connectionFailed:
             return "Could not connect to the local Codex app server."
         case .serverError(let message), .protocolError(let message):
@@ -1396,18 +1399,60 @@ final class CodexAppServerConnection {
 
     private func codexBinaryPath() throws -> String {
         let env = ProcessInfo.processInfo.environment
-        let candidates = [
-            env["CODEX_BIN"],
-            "\(NSHomeDirectory())/.bun/bin/codex",
-            "\(NSHomeDirectory())/.npm-global/bin/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex"
-        ].compactMap { $0 }
+        let home = NSHomeDirectory()
+        // Highest priority: an explicit path the user set in Settings → AI, then
+        // the CODEX_BIN env var. Read UserDefaults directly so this stays off the
+        // main actor; the key matches BrowserSettings.Key.codexBinaryPath.
+        let configured = UserDefaults.standard
+            .string(forKey: "mori.codexBinaryPath")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Every directory a package / node-version manager might drop `codex`
+        // into — the SAME set spawnEnvironment uses to find `node`, so the binary
+        // search and the spawn PATH never disagree (previously the binary search
+        // omitted nvm/fnm/.local/.volta, so a Finder-launched app couldn't find a
+        // codex installed by a version manager even though it could run it).
+        let searchDirs = [
+            "\(home)/.bun/bin",
+            "\(home)/.npm-global/bin",
+            "\(home)/.local/bin",
+            "\(home)/.volta/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ] + Self.nodeManagerBinDirs()
+
+        var candidates: [String] = []
+        if let configured, !configured.isEmpty { candidates.append(configured) }
+        if let codexBin = env["CODEX_BIN"], !codexBin.isEmpty { candidates.append(codexBin) }
+        candidates += searchDirs.map { "\($0)/codex" }
 
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return path
         }
         throw CodexAppServerError.codexBinaryMissing
+    }
+
+    /// Per-version `bin` dirs for nvm and fnm (newest version first), each
+    /// confirmed to contain `node`. A globally-installed `codex` lives alongside
+    /// `node` in the same dir, so this feeds both the binary search above and the
+    /// spawn PATH below. A Finder/DMG-launched app never inherits these.
+    static func nodeManagerBinDirs() -> [String] {
+        let home = NSHomeDirectory()
+        let roots = ["\(home)/.nvm/versions/node",
+                     "\(home)/.local/share/fnm/node-versions"]
+        var dirs: [String] = []
+        for root in roots {
+            guard let entries = try? FileManager.default
+                .contentsOfDirectory(atPath: root) else { continue }
+            let sorted = entries.sorted { $0.compare($1, options: .numeric) == .orderedDescending }
+            for v in sorted {
+                // fnm nests an extra "installation" dir; try both layouts.
+                for bin in ["\(root)/\(v)/bin", "\(root)/\(v)/installation/bin"]
+                where FileManager.default.fileExists(atPath: "\(bin)/node") {
+                    dirs.append(bin)
+                }
+            }
+        }
+        return dirs
     }
 
     /// Builds the environment for the spawned `codex` process.
@@ -1427,29 +1472,11 @@ final class CodexAppServerConnection {
         let home = NSHomeDirectory()
         // `codex` is a Node script, so the spawn PATH must contain `node`. Node
         // version managers install node under a versioned dir that a Finder-
-        // launched app never inherits. Discover NVM (and fnm) node bins —
-        // newest version first — so the shebang resolves regardless of launch.
-        let nvmBins: [String] = {
-            let roots = ["\(home)/.nvm/versions/node",
-                         "\(home)/.local/share/fnm/node-versions"]
-            var dirs: [String] = []
-            for root in roots {
-                guard let entries = try? FileManager.default
-                    .contentsOfDirectory(atPath: root) else { continue }
-                let sorted = entries.sorted { $0.compare($1, options: .numeric) == .orderedDescending }
-                for v in sorted {
-                    // fnm nests an extra "installation" dir; try both layouts.
-                    for bin in ["\(root)/\(v)/bin", "\(root)/\(v)/installation/bin"]
-                    where FileManager.default.fileExists(atPath: "\(bin)/node") {
-                        dirs.append(bin)
-                    }
-                }
-            }
-            return dirs
-        }()
+        // launched app never inherits; nodeManagerBinDirs() discovers them
+        // (newest first) so the shebang resolves regardless of launch.
         let preferredDirs = [
             URL(fileURLWithPath: codexPath).deletingLastPathComponent().path
-        ] + nvmBins + [
+        ] + nodeManagerBinDirs() + [
             "\(home)/.local/bin",
             "\(home)/.bun/bin",
             "\(home)/.npm-global/bin",
